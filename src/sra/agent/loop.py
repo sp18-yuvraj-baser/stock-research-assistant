@@ -4,9 +4,10 @@ from typing import Any
 
 import httpx
 
-from sra.agent.prompts import RUN_SQL_TOOL, SYSTEM_PROMPT
+from sra.agent.prompts import RUN_SQL_TOOL, SEARCH_FILINGS_TOOL, SYSTEM_PROMPT
 from sra.config import settings
 from sra.tools.run_sql import SqlResult, run_sql
+from sra.tools.search_filings import DEFAULT_K, SearchResult, search_filings
 
 MAX_TOOL_ROUNDS = 6
 
@@ -16,8 +17,18 @@ class Answer:
     question: str
     text: str
     sql_calls: list[SqlResult] = field(default_factory=list)
+    search_calls: list[SearchResult] = field(default_factory=list)
     rounds: int = 0
     stopped_early: bool = False
+
+    @property
+    def cited_sections(self) -> set[tuple[str, str]]:
+        """(section, accession) pairs actually retrieved, for citation scoring."""
+        return {
+            (passage.section, passage.accession_no)
+            for call in self.search_calls
+            for passage in call.passages
+        }
 
     @property
     def cited_values(self) -> set[str]:
@@ -45,11 +56,15 @@ def _chat(client: httpx.Client, messages: list[dict[str, Any]]) -> dict[str, Any
         json={
             "model": settings().generation_model,
             "messages": messages,
-            "tools": [RUN_SQL_TOOL],
+            "tools": [RUN_SQL_TOOL, SEARCH_FILINGS_TOOL],
             "stream": False,
-            # Figures are read from tool output, not sampled; keep the wording
-            # and the SQL as deterministic as the runtime allows.
-            "options": {"temperature": 0.0},
+            "options": {
+                # Figures are read from tool output, not sampled; keep the
+                # wording and the SQL as deterministic as the runtime allows.
+                "temperature": 0.0,
+                "num_ctx": settings().context_tokens,
+                "num_predict": settings().max_output_tokens,
+            },
         },
     )
     if response.status_code != 200:
@@ -70,6 +85,31 @@ def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
             return {}
         return decoded if isinstance(decoded, dict) else {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _dispatch(name: str, arguments: dict[str, Any], answer: "Answer") -> str:
+    """Run one tool call and record it on the answer for later scoring."""
+    if name == "run_sql":
+        result = run_sql(str(arguments.get("sql", "")))
+        answer.sql_calls.append(result)
+        return result.to_text()
+    if name == "search_filings":
+        raw_k = arguments.get("k")
+        found = search_filings(
+            str(arguments.get("query", "")),
+            ticker=_optional_str(arguments.get("ticker")),
+            form_type=_optional_str(arguments.get("form_type")),
+            section=_optional_str(arguments.get("section")),
+            k=int(raw_k) if isinstance(raw_k, int) else DEFAULT_K,
+        )
+        answer.search_calls.append(found)
+        return found.to_text()
+    return f"ERROR: no tool named {name!r}"
+
+
+def _optional_str(value: object) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
 
 
 def ask(question: str, *, max_rounds: int = MAX_TOOL_ROUNDS) -> Answer:
@@ -100,25 +140,11 @@ def ask(question: str, *, max_rounds: int = MAX_TOOL_ROUNDS) -> Answer:
                 }
             )
             for call in tool_calls:
-                name = call.get("function", {}).get("name")
-                if name != "run_sql":
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_name": name or "unknown",
-                            "content": f"ERROR: no tool named {name!r}",
-                        }
-                    )
-                    continue
-                sql = str(_tool_arguments(call).get("sql", ""))
-                result = run_sql(sql)
-                answer.sql_calls.append(result)
+                name = str(call.get("function", {}).get("name") or "")
+                arguments = _tool_arguments(call)
+                content = _dispatch(name, arguments, answer)
                 messages.append(
-                    {
-                        "role": "tool",
-                        "tool_name": "run_sql",
-                        "content": result.to_text(),
-                    }
+                    {"role": "tool", "tool_name": name or "unknown", "content": content}
                 )
 
     answer.stopped_early = True

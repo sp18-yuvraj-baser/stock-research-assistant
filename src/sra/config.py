@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     readonly_dsn: str
     ollama_url: str = "http://localhost:11434"
     generation_model: str = "gemma4:latest"
+    embedding_model: str = "nomic-embed-text"
+
+    # Ollama defaults num_ctx to 4096, which a handful of retrieved passages
+    # exceeds on its own: the model then runs out of context mid-answer and
+    # returns empty content with done_reason "length".
+    context_tokens: int = 32768
+    max_output_tokens: int = 2048
 
     # SEC asks for no more than 10 req/s aggregate; stay under it.
     sec_max_requests_per_second: float = 8.0

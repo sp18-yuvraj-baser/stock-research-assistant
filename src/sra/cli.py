@@ -2,6 +2,7 @@ import argparse
 import sys
 
 from sra.agent.loop import ask
+from sra.ingest.narrative_run import index_narrative
 from sra.ingest.run import DEFAULT_TICKERS, ingest_tickers
 from sra.migrate import apply_migrations
 
@@ -23,6 +24,20 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             f"{r.ticker:<8}{r.cik:<12}{r.filings:>9}{r.facts_staged:>10}"
             f"{r.facts_skipped:>9}{r.stub_filings:>8}{r.fiscal_labels:>10}"
         )
+    return 0
+
+
+def _cmd_index(args: argparse.Namespace) -> int:
+    reports = index_narrative(
+        args.tickers or None, annual=args.annual, quarterly=args.quarterly
+    )
+    print(f"{'ticker':<8}{'form':<7}{'accession':<24}{'sections':>9}{'chunks':>8}")
+    for r in reports:
+        print(
+            f"{r.ticker:<8}{r.form_type:<7}{r.accession_no:<24}"
+            f"{r.sections:>9}{r.chunks:>8}"
+        )
+    print(f"\ntotal chunks: {sum(r.chunks for r in reports)}")
     return 0
 
 
@@ -58,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="bypass the SEC response cache",
     )
     ingest.set_defaults(func=_cmd_ingest)
+
+    index = sub.add_parser("index", help="parse, chunk and embed filing text")
+    index.add_argument("tickers", nargs="*")
+    index.add_argument("--annual", type=int, default=2, help="10-Ks per company")
+    index.add_argument("--quarterly", type=int, default=4, help="10-Qs per company")
+    index.set_defaults(func=_cmd_index)
 
     ask_cmd = sub.add_parser("ask", help="ask a question about the filings")
     ask_cmd.add_argument("question", nargs="+")

@@ -8,14 +8,16 @@ from sra.sec.client import SecClient
 
 UPSERT = """
 INSERT INTO filings (accession_no, cik, form_type, filed_date,
-                     period_of_report, is_amendment)
+                     period_of_report, is_amendment, primary_document)
 VALUES (%(accession_no)s, %(cik)s, %(form_type)s, %(filed_date)s,
-        %(period_of_report)s, %(is_amendment)s)
+        %(period_of_report)s, %(is_amendment)s, %(primary_document)s)
 ON CONFLICT (accession_no) DO UPDATE
 SET form_type = EXCLUDED.form_type,
     filed_date = EXCLUDED.filed_date,
     period_of_report = EXCLUDED.period_of_report,
-    is_amendment = EXCLUDED.is_amendment
+    is_amendment = EXCLUDED.is_amendment,
+    primary_document = COALESCE(EXCLUDED.primary_document,
+                                filings.primary_document)
 """
 
 
@@ -39,6 +41,9 @@ def _rows_from_table(cik: str, table: dict[str, list[Any]]) -> list[dict[str, An
                 "filed_date": _parse_date(table["filingDate"][i]),
                 "period_of_report": _parse_date(table["reportDate"][i]),
                 "is_amendment": form_type.endswith("/A"),
+                "primary_document": (
+                    table.get("primaryDocument") or [None] * len(accessions)
+                )[i],
             }
         )
     return rows
