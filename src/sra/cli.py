@@ -1,10 +1,12 @@
 import argparse
 import sys
 
-from sra.agent.loop import ask
+from sra.agent.compose import ask
+from sra.agent.loop import OllamaError
 from sra.ingest.narrative_run import index_narrative
 from sra.ingest.run import DEFAULT_TICKERS, ingest_tickers
 from sra.migrate import apply_migrations
+from sra.narrative.embeddings import EmbeddingError
 
 
 def _cmd_migrate(_args: argparse.Namespace) -> int:
@@ -43,12 +45,26 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 def _cmd_ask(args: argparse.Namespace) -> int:
     answer = ask(" ".join(args.question))
+    if args.explain:
+        print(f"route: {answer.route.value}", file=sys.stderr)
+        for reason in answer.routing.reasons:
+            print(f"  because {reason}", file=sys.stderr)
     if args.show_sql:
-        for i, call in enumerate(answer.sql_calls, start=1):
-            print(f"--- query {i} ---\n{call.sql}\n{call.to_text()}\n")
+        for path in answer.paths:
+            for i, call in enumerate(path.sql_calls, start=1):
+                print(f"--- query {i} ---\n{call.sql}\n{call.to_text()}\n")
+            for i, search in enumerate(path.search_calls, start=1):
+                found = ", ".join(
+                    f"{passage.section} {passage.accession_no}"
+                    for passage in search.passages
+                )
+                print(f"--- search {i} ---\n{search.query}\n{found}\n")
     print(answer.text)
+    queries = sum(len(p.sql_calls) for p in answer.paths)
+    searches = sum(len(p.search_calls) for p in answer.paths)
     print(
-        f"\n[{answer.rounds} tool round(s), {len(answer.sql_calls)} query(ies)]",
+        f"\n[route={answer.route.value}, {answer.rounds} round(s), "
+        f"{queries} query(ies), {searches} search(es)]",
         file=sys.stderr,
     )
     return 1 if answer.stopped_early else 0
@@ -83,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask_cmd = sub.add_parser("ask", help="ask a question about the filings")
     ask_cmd.add_argument("question", nargs="+")
     ask_cmd.add_argument(
+        "--explain",
+        action="store_true",
+        help="print the route taken and the features that decided it",
+    )
+    ask_cmd.add_argument(
         "--show-sql",
         action="store_true",
         help="print every query the agent ran and the rows it got back",
@@ -94,7 +115,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return int(args.func(args))
+    try:
+        return int(args.func(args))
+    except (OllamaError, EmbeddingError) as exc:
+        # An unreachable local model is the most common setup failure; a
+        # traceback tells the user nothing they can act on.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@ declines to recommend.
 
 ## Status
 
-Weeks 1-2 of 6 complete: the structured (XBRL) path, the narrative (RAG) path,
-`run_sql`, `search_filings`, and the agent loop. The explicit router, eval
-harness, restatement handling, and UI are not built yet.
+Weeks 1-3 of 6 complete: the structured (XBRL) path, the narrative (RAG) path,
+the router, and hybrid composition. The eval harness, restatement handling, and
+UI are not built yet.
 
 ## The rule everything follows from
 
@@ -47,7 +47,44 @@ otherwise.
 sra ask "What was Nvidia's revenue in FY2025?"
 sra ask --show-sql "What was Nvidia's revenue last quarter?"
 sra ask "What risks does Nvidia cite around export controls?"
+sra ask --explain "Why did Nvidia's gross margin change last quarter?"
 ```
+
+`--explain` prints the route taken and the features that decided it.
+
+## Routing and composition
+
+A question is classified as numeric, narrative, hybrid, or a request for advice.
+The rules are deterministic, so a misroute is reproducible and fixable rather
+than something to be scored statistically, and no model call is spent on
+classifying. Each route carries the features that produced it.
+
+The two paths run separately and see only their own tool. The numeric path
+cannot quote prose; the narrative path has no way to look up a figure, so it
+cannot invent one.
+
+For a hybrid question both run and the answer is assembled **in code**, not by
+asking the model to merge them. A prompt instruction not to blend figures with
+prose is a request; a renderer that prints two finished sub-answers under
+separate headings with their own citations is a guarantee. The numeric path runs
+first so the periods it resolved can scope the search -- otherwise the two
+halves can end up discussing different quarters. When they still cite no filing
+in common, the answer says so.
+
+Declining a recommendation happens in code too, before any model call, so it
+cannot be talked out of it and does not depend on sampling.
+
+## Derived figures
+
+A margin, ratio or growth rate is not tagged in XBRL; only its components are.
+These are computed in SQL rather than by the model: the database is a
+deterministic calculator, and its output is a tool result like any other. The
+model is never asked to do arithmetic.
+
+This was not optional. With arithmetic forbidden outright, the numeric path
+fetched gross profit and revenue, then reissued the same query until it ran out
+of rounds, because the figure it needed was not tagged and it was not allowed to
+derive it.
 
 ## Splitting filings at Item boundaries
 

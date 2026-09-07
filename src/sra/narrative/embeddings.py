@@ -19,9 +19,22 @@ def _embed(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
     cfg = settings()
-    with httpx.Client(base_url=cfg.ollama_url, timeout=httpx.Timeout(600.0)) as client:
-        response = client.post(
-            "/api/embed", json={"model": cfg.embedding_model, "input": texts}
+    try:
+        with httpx.Client(
+            base_url=cfg.ollama_url, timeout=httpx.Timeout(600.0)
+        ) as client:
+            response = client.post(
+                "/api/embed", json={"model": cfg.embedding_model, "input": texts}
+            )
+    except httpx.HTTPError as exc:
+        raise EmbeddingError(
+            f"cannot reach the embedding model at {cfg.ollama_url}. "
+            "Start it with `ollama serve`."
+        ) from exc
+    if response.status_code == 404:
+        raise EmbeddingError(
+            f"model {cfg.embedding_model!r} is not installed. "
+            f"Pull it with `ollama pull {cfg.embedding_model}`."
         )
     if response.status_code != 200:
         raise EmbeddingError(f"{response.status_code}: {response.text[:300]}")
