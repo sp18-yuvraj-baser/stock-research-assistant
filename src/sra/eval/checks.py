@@ -43,6 +43,8 @@ _NOT_A_FIGURE = (
     # Named standards and frameworks carry numbers that are identifiers:
     # "ISO 31000:2018" is not a figure.
     r"\b(iso|iec|ieee|nist sp|sox|asc|ifrs|fasb|sfas)\s*\d+(:\d+)?(-\d+)?\b",
+    # Financial-statement note references: "Note 9-Net Income per Share".
+    r"\bnotes?\s+\d{1,2}(\s*(and|to|,|-|&)\s*\d{1,2})*\b",
     # A colon-year suffix marks a standard regardless of what introduces it:
     # "Standardization 31000:2018" names ISO 31000, not a quantity.
     r"\b\d+:(19|20)\d{2}\b",
@@ -208,6 +210,54 @@ def quoted_spans(answer: str) -> list[str]:
             continue
         spans.append(span)
     return spans
+
+
+# Characters filings and models render differently, plus the editorial
+# conventions a faithful quotation is allowed to use.
+# Quote marks are dropped rather than mapped between: a model may render the
+# filing's curly double quotes as straight single ones, so no mapping makes the
+# two sides agree. Removing them from both sides does, and the words still have
+# to match.
+_QUOTE_TRANSLATIONS = str.maketrans(
+    {
+        "\u201c": "",
+        "\u201d": "",
+        "\u2018": "",
+        "\u2019": "",
+        '"': "",
+        "'": "",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u00a0": " ",
+    }
+)
+_EDITORIAL_INSERTION = re.compile(r"\[[^\]]{0,40}\]")
+
+
+def normalize_quote(text: str) -> str:
+    """Put a quotation and a passage into the same form before comparing.
+
+    Quoting conventions are not fabrication: a faithful quotation may end on a
+    comma where the filing ends on a period, render curly quotes as straight
+    ones, or mark an edited word with brackets. Comparing raw substrings
+    reported all three as unverified. The words themselves still have to match,
+    so a fabricated quotation continues to fail.
+    """
+    cleaned = _EDITORIAL_INSERTION.sub("", text.translate(_QUOTE_TRANSLATIONS))
+    return " ".join(cleaned.split()).strip(" .,;:!?-'\"")
+
+
+# Compare on a prefix: a long quotation may be trimmed mid-sentence, and the
+# opening words are enough to establish it came from the passage.
+QUOTE_MATCH_CHARS = 60
+
+
+def quote_is_supported(quote: str, passages: list[str]) -> bool:
+    """Whether a quotation appears in one of the passages that was retrieved."""
+    needle = normalize_quote(quote)[:QUOTE_MATCH_CHARS]
+    if not needle:
+        return False
+    return any(needle in normalize_quote(passage) for passage in passages)
 
 
 def sections_hit(expected: list[str], retrieved: list[str]) -> list[str]:

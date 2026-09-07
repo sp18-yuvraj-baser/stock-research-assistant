@@ -18,6 +18,8 @@ from sra.eval.checks import (
     extract_figures,
     has_unbalanced_quotes,
     looks_like_refusal,
+    normalize_quote,
+    quote_is_supported,
     quoted_spans,
     sections_hit,
     value_match,
@@ -67,6 +69,9 @@ def test_digits_glued_to_letters_are_product_names(text: str) -> None:
         "for the three months ended October 31, 2025",
         "the fiscal year ended August 31, 2025",
         "as of 30 September",
+        # A statement note reference, not a quantity.
+        "details in Note 9-Net Income per Common Share",
+        "see Notes 12 and 13",
     ],
 )
 def test_form_names_standards_and_prose_dates_are_not_figures(text: str) -> None:
@@ -178,3 +183,62 @@ def test_refusals_are_recognised(answer: str) -> None:
 
 def test_a_confident_answer_is_not_a_refusal() -> None:
     assert not looks_like_refusal("Revenue was 130,497,000,000 in FY2025.")
+
+
+def test_a_note_reference_beside_a_figure_keeps_the_figure() -> None:
+    figures = extract_figures("Note 9 states net income was 8,099,000,000.")
+    assert [f.text for f in figures] == ["8,099,000,000"]
+
+
+@pytest.mark.parametrize(
+    ("quote", "passage"),
+    [
+        # Quoting conventions a faithful quotation is allowed to use. Each of
+        # these was reported unverified in the second baseline.
+        (
+            "integral to our business and profitability,",
+            "Membership fees are integral to our business and profitability.",
+        ),
+        (
+            "underestimate[s] demand, and our foundry partners",
+            "if we underestimate demand, and our foundry partners are unable",
+        ),
+        (
+            "Litigation (MDL No. 2804) (the 'MDL') is pending",
+            "Litigation (MDL No. 2804) (the \u201cMDL\u201d) is pending in the U.S.",
+        ),
+        (
+            "Advancing  the NVIDIA   accelerated computing platform",
+            "Advancing the NVIDIA accelerated computing platform, including",
+        ),
+    ],
+)
+def test_faithful_quotations_are_accepted(quote: str, passage: str) -> None:
+    assert quote_is_supported(quote, [passage])
+
+
+@pytest.mark.parametrize(
+    ("quote", "passage"),
+    [
+        # Normalisation must not launder a fabrication.
+        (
+            "margins decreased to 61.2% for the quarter",
+            "Gross margins decreased to 73.4% for the quarter",
+        ),
+        ("we plan to open a theme park", "Our data center revenue grew."),
+        ("demand was weak and falling", "Demand was strong and rising."),
+    ],
+)
+def test_fabricated_quotations_still_fail(quote: str, passage: str) -> None:
+    assert not quote_is_supported(quote, [passage])
+
+
+def test_a_quotation_with_nothing_retrieved_cannot_be_supported() -> None:
+    assert not quote_is_supported("anything at all", [])
+
+
+def test_normalisation_keeps_the_words() -> None:
+    # Quote marks are dropped from both sides; the words must survive.
+    assert (
+        normalize_quote("  the \u201cquick\u201d brown fox,  ") == "the quick brown fox"
+    )

@@ -28,6 +28,7 @@ from sra.eval.checks import (
     classify_figures,
     has_unbalanced_quotes,
     looks_like_refusal,
+    quote_is_supported,
     quoted_spans,
     sections_hit,
     value_match,
@@ -168,7 +169,7 @@ def _evaluate_once(question: EvalQuestion) -> QuestionResult:
         evidence_accessions=evidence,
         quoted_spans_total=len(spans),
         quoted_spans_verified=sum(
-            1 for span in spans if any(span[:80] in p for p in passages)
+            1 for span in spans if quote_is_supported(span, passages)
         ),
         refusal_detected=looks_like_refusal(answer.text),
         unbalanced_quotes=has_unbalanced_quotes(answer.text),
@@ -301,6 +302,11 @@ def score(results: list[QuestionResult]) -> tuple[list[Metric], list[str]]:
     for result in results:
         if result.sql_values or result.passages or result.answer:
             result.figures = _verdicts(result)
+            spans = quoted_spans(result.answer)
+            result.quoted_spans_total = len(spans)
+            result.quoted_spans_verified = sum(
+                1 for span in spans if quote_is_supported(span, result.passages)
+            )
 
     # Headline: a figure in an answer that traces to no evidence at all.
     clean_answers = [
