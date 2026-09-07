@@ -112,6 +112,34 @@ Answer briefly. Give the figure, its fiscal period, and the accession number it
 came from.\
 """
 
+_WIDENING = """\
+WHEN A QUERY RETURNS NOTHING
+  Zero rows means your filters were wrong far more often than it means the
+  figure is absent. Never say a figure is unavailable until you have run a
+  query filtered on cik and tag alone and looked at what periods came back.
+
+  Work backwards through the filters:
+    1. Drop fiscal_year and fiscal_period, keep cik and tag, and list what
+       periods exist:
+         SELECT fiscal_year, fiscal_period, period_type, period_end, value
+         FROM facts_current WHERE cik = '...' AND tag = '...'
+         ORDER BY period_end DESC LIMIT 20
+    2. Check period_type. A balance is an instant, not an annual figure:
+       Assets, Liabilities, StockholdersEquity, InventoryNet, cash balances and
+       share counts are all period_type = 'instant', even when the question
+       says "at the end of FY2025". Only flows -- revenue, profit, expenses,
+       cash flow -- are 'annual', 'quarter' or 'ytd'.
+    3. Check the tag. Filers differ and switch over time: Apple never tags
+       Revenues at all, using
+       RevenueFromContractWithCustomerExcludingAssessedTax instead. Query both
+       candidates with tag IN (...), or list what the filer actually uses.
+
+  Copy figures out of the result exactly, digit for digit. Dropping or adding a
+  single zero turns 72,880,000,000 into a number that is off by a factor of ten
+  while still looking plausible.
+"""
+
+
 _DERIVED = """\
 DERIVED FIGURES
   A margin, ratio, growth rate or period-over-period change is not tagged in
@@ -133,6 +161,10 @@ DERIVED FIGURES
       AND gp.period_type = 'quarter'
     ORDER BY gp.period_end DESC LIMIT 8
 
+  When you report a derived figure, report the components it came from as well,
+  each with its accession number. A ratio on its own cannot be checked against
+  the filing; the numerator and denominator can.
+
   No 10-Q covers a fourth quarter, so a quarterly series skips Q4. Say so
   rather than presenting the series as continuous.
 """
@@ -144,12 +176,18 @@ in a PostgreSQL database. The run_sql tool is your only source.
 
 {_ONE_RULE}
 {_SQL_KNOWLEDGE}
+{_WIDENING}
 {_DERIVED}
 {_SCOPE}
-Answer with the figures only: the value, its fiscal period, and the accession
-number each came from. Do not explain why a figure moved -- you have no access
-to the filing text that would say. If the question asks why, give the figures
-and leave the explanation out.
+Always retrieve the figures, whatever the question asks. A question about why
+something changed still needs them: fetch the figures for the periods involved,
+report them, and say only that the explanation is outside what you can see.
+Never answer a "why" question by declining and offering to look figures up --
+look them up.
+
+Answer with the figures: the value, its fiscal period, and the accession number
+each came from. Do not explain why a figure moved; you have no access to the
+filing text that would say.
 """
 
 NARRATIVE_SYSTEM_PROMPT = f"""\

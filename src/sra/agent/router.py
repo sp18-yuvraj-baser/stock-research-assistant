@@ -34,9 +34,16 @@ _ADVICE = (
     r" (buy|investment|stock|bet)",
     r"worth (buying|selling|holding|investing)",
     r"price target",
-    r"(will|would|could) (the )?(stock|share|price|it) (go|rise|fall|drop|climb|reach)",
+    # A company name sits between the verb and the noun in practice:
+    # "Will Microsoft's stock go up next quarter?"
+    r"(will|would|could)\b.{0,40}?\b(stock|shares?|share price|price)\b"
+    r".{0,20}?\b(go|rise|fall|drop|climb|reach|hit|outperform|be worth)",
     r"what.{0,20}(stock|shares?) (should|to) (i|we) (buy|sell|pick)",
-    r"(recommend|advise) (a |an |any )?(stock|buy|sell|investment|purchase)",
+    # "Can you recommend a semiconductor stock to buy?" -- the qualifier sits
+    # between the article and the noun.
+    r"(recommend|advise)\b.{0,40}?\b(stock|shares?|buy|sell|investment|purchase)",
+    r"(which|what) (stock|shares?|company).{0,30}(should|would) (i|we)",
+    r"what should (i|we) (buy|sell|invest|own)",
     r"do you (think|believe).{0,30}(buy|sell|invest|outperform|go up|go down)",
     r"(bullish|bearish|undervalued|overvalued)",
     r"invest(ment)? advice",

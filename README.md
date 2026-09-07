@@ -8,9 +8,9 @@ declines to recommend.
 
 ## Status
 
-Weeks 1-3 of 6 complete: the structured (XBRL) path, the narrative (RAG) path,
-the router, and hybrid composition. The eval harness, restatement handling, and
-UI are not built yet.
+Weeks 1-4 of 6 complete: the structured (XBRL) path, the narrative (RAG) path,
+the router, hybrid composition, and the eval harness. Restatement handling and
+the UI are not built yet.
 
 ## The rule everything follows from
 
@@ -85,6 +85,71 @@ This was not optional. With arithmetic forbidden outright, the numeric path
 fetched gross profit and revenue, then reissued the same query until it ran out
 of rounds, because the figure it needed was not tagged and it was not allowed to
 derive it.
+
+## Evaluation
+
+```bash
+sra eval run      # answers all 43 questions, slow, writes evals/results.json
+sra eval score    # reprints the scoreboard from stored results, instant
+```
+
+Running and scoring are separate commands: running drives a local model for
+every question, while scoring is pure computation over stored results, so a
+scoreboard can be reprinted and failures re-examined without paying for another
+run.
+
+Every check is mechanical. There is no LLM judge and no hand grading, so the
+same results always produce the same scoreboard.
+
+**The answer key builds itself.** Numeric questions store a specification of the
+fact they expect -- filer, tag, fiscal period, period type -- and never a
+literal value. The expected figure is resolved from the facts table at eval
+time, so the key cannot drift out of date, and a restatement updates the key
+along with the answer instead of turning a correct answer into a failure.
+
+**Headline metric: hallucinated-number rate.** Every figure an answer asserts is
+traced back to evidence and lands in one of four buckets:
+
+| Bucket | Meaning |
+|---|---|
+| exact | identical to a value a `run_sql` result returned |
+| quoted | inside a verbatim quotation, and present in a retrieved passage |
+| rounded | traces to a real value, restated at lower precision |
+| untraceable | **the failure** -- traces to nothing |
+
+Rounding is reported separately rather than folded into the headline: restating
+130,497,000,000 as "$130.5 billion" is a different fault from inventing a
+number, and merging the two would make the metric unreadable.
+
+Getting the extraction right matters more than it sounds, and every exclusion
+below was added because it produced a false failure in a real run:
+
+| Looks numeric | Actually | Example |
+|---|---|---|
+| `10-K`, `10-Q` | a form name | contributed the figure `10` five times |
+| `September 29, 2018` | a prose date | contributed `29` |
+| `31000:2018` | a named standard | contributed `31000` |
+| `H20`, `GB200`, `RTX50` | product names | digits glued to letters |
+| `0001045810-26-000021` | an accession number | |
+| `Item 1A`, `FY2025`, `Q2` | section and period labels | |
+
+Without them the identifiers swamp the real figures and the metric means
+nothing. The first baseline reported 19.7% before these exclusions and 3.3%
+after; ten of its twelve reported failures were the harness miscounting, not
+the system inventing numbers. A metric that miscounts is worse than no metric,
+so the extractor has its own regression tests.
+
+Scoring re-derives every figure verdict from stored evidence -- the answer
+text, the values `run_sql` returned, and the passages retrieved -- rather than
+trusting verdicts recorded during the run. Storing only the verdicts made the
+run/score split pointless, because correcting a check then needed another run.
+The SQL each path issued is stored too, so a wrong answer can be traced to the
+query that produced it.
+
+A period error is counted only when a wrong period's value stood in **instead
+of** the right one. An answer that states the right figure and also shows
+neighbouring periods is giving context: "why did margin change last quarter"
+cannot be answered without quoting the prior quarter.
 
 ## Splitting filings at Item boundaries
 

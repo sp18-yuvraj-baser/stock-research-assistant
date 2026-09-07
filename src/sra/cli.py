@@ -1,8 +1,15 @@
 import argparse
 import sys
+import time
 
 from sra.agent.compose import ask
 from sra.agent.loop import OllamaError
+from sra.eval.harness import (
+    StaleResultsError,
+    format_scoreboard,
+    load_results,
+    run_eval,
+)
 from sra.ingest.narrative_run import index_narrative
 from sra.ingest.run import DEFAULT_TICKERS, ingest_tickers
 from sra.migrate import apply_migrations
@@ -70,6 +77,20 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 1 if answer.stopped_early else 0
 
 
+def _cmd_eval_run(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    results = run_eval(only=args.only or None, workers=args.workers)
+    elapsed = time.monotonic() - started
+    print(f"ran {len(results)} questions in {elapsed:.0f}s\n")
+    print(format_scoreboard(results))
+    return 0
+
+
+def _cmd_eval_score(_args: argparse.Namespace) -> int:
+    print(format_scoreboard(load_results()))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sra")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -110,6 +131,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_cmd.set_defaults(func=_cmd_ask)
 
+    evaluate = sub.add_parser("eval", help="run or score the eval set")
+    eval_sub = evaluate.add_subparsers(dest="eval_command", required=True)
+
+    eval_run = eval_sub.add_parser(
+        "run", help="answer every question and store results"
+    )
+    eval_run.add_argument(
+        "--only", nargs="*", help="question ids or types to run, e.g. numeric q001"
+    )
+    eval_run.add_argument("--workers", type=int, default=3)
+    eval_run.set_defaults(func=_cmd_eval_run)
+
+    eval_score = eval_sub.add_parser(
+        "score", help="print the scoreboard from stored results"
+    )
+    eval_score.set_defaults(func=_cmd_eval_score)
+
     return parser
 
 
@@ -117,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
-    except (OllamaError, EmbeddingError) as exc:
+    except (OllamaError, EmbeddingError, StaleResultsError) as exc:
         # An unreachable local model is the most common setup failure; a
         # traceback tells the user nothing they can act on.
         print(f"error: {exc}", file=sys.stderr)

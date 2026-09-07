@@ -1,0 +1,552 @@
+[
+  {
+    "id": "q001",
+    "question": "What was Nvidia's revenue in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "Revenues",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": "Fiscal 2025 ended 2025-01-26; must not use calendar 2025."
+  },
+  {
+    "id": "q002",
+    "question": "What was Apple's revenue in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "AAPL",
+        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": "Apple's fiscal year ends in late September."
+  },
+  {
+    "id": "q003",
+    "question": "What was Microsoft's revenue in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "MSFT",
+        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": "Microsoft's fiscal year ends 30 June."
+  },
+  {
+    "id": "q004",
+    "question": "What was Costco's revenue in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "COST",
+        "tag": "Revenues",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": "Costco's fiscal year ends in late August."
+  },
+  {
+    "id": "q005",
+    "question": "What were Walmart's total revenues in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "WMT",
+        "tag": "Revenues",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": "Walmart tags Revenues (incl. membership) and net sales separately; they differ by billions."
+  },
+  {
+    "id": "q006",
+    "question": "What was Nvidia's revenue last quarter?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "Revenues",
+        "period_type": "quarter",
+        "unit": "USD",
+        "latest": true
+      }
+    ],
+    "notes": "Must be the discrete quarter, not the year-to-date total sharing the same period_end."
+  },
+  {
+    "id": "q007",
+    "question": "What was Nvidia's revenue in fiscal Q2 2027?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "Revenues",
+        "period_type": "quarter",
+        "unit": "USD",
+        "fiscal_year": 2027,
+        "fiscal_period": "Q2"
+      }
+    ],
+    "notes": "The 182-day year-to-date figure carries the same fiscal label."
+  },
+  {
+    "id": "q008",
+    "question": "What was Apple's revenue in fiscal Q3 2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "AAPL",
+        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "period_type": "quarter",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "Q3"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q009",
+    "question": "What was Nvidia's gross profit in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "GrossProfit",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q010",
+    "question": "What was Nvidia's net income in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "NetIncomeLoss",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q011",
+    "question": "What was Nvidia's operating income in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "OperatingIncomeLoss",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q012",
+    "question": "What was Nvidia's cost of revenue in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "CostOfRevenue",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q013",
+    "question": "What was Apple's diluted EPS in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "AAPL",
+        "tag": "EarningsPerShareDiluted",
+        "period_type": "annual",
+        "unit": "USD/shares",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q014",
+    "question": "How much did Microsoft spend on research and development in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "MSFT",
+        "tag": "ResearchAndDevelopmentExpense",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q015",
+    "question": "What were Walmart's total assets at the end of FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "WMT",
+        "tag": "Assets",
+        "period_type": "instant",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q016",
+    "question": "What were Apple's total assets at the end of FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "AAPL",
+        "tag": "Assets",
+        "period_type": "instant",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q017",
+    "question": "What was Microsoft's net income in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "MSFT",
+        "tag": "NetIncomeLoss",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q018",
+    "question": "What was Costco's net income in FY2025?",
+    "type": "numeric",
+    "expected_facts": [
+      {
+        "ticker": "COST",
+        "tag": "NetIncomeLoss",
+        "period_type": "annual",
+        "unit": "USD",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY"
+      }
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q019",
+    "question": "What risks does Nvidia cite around export controls?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q020",
+    "question": "What does Apple say about competition?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A",
+      "Item 1"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q021",
+    "question": "How does Microsoft describe its cybersecurity risk?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A",
+      "Item 1C"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q022",
+    "question": "What does Walmart disclose about supply chain risk?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q023",
+    "question": "How does Costco describe its membership model?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q024",
+    "question": "What legal proceedings does Walmart describe?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 3",
+      "Item 1"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q025",
+    "question": "What does Nvidia say about its data center business strategy?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1",
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q026",
+    "question": "What does Apple's MD&A say about Services revenue?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q027",
+    "question": "What risks does Microsoft cite about artificial intelligence?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q028",
+    "question": "What does Nvidia disclose about supply concentration?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A",
+      "Item 1"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q029",
+    "question": "What does Costco say about competition from other retailers?",
+    "type": "narrative",
+    "expected_sections": [
+      "Item 1A",
+      "Item 1"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q030",
+    "question": "Why did Nvidia's gross margin change last quarter?",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "GrossProfit",
+        "period_type": "quarter",
+        "unit": "USD",
+        "latest": true
+      }
+    ],
+    "expected_sections": [
+      "Item 7",
+      "Item 2"
+    ],
+    "notes": "Figures and explanation must cover the same fiscal period."
+  },
+  {
+    "id": "q031",
+    "question": "Why did Nvidia's revenue grow in FY2025?",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "NVDA",
+        "tag": "Revenues",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_type": "annual",
+        "unit": "USD"
+      }
+    ],
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q032",
+    "question": "What drove the change in Microsoft's operating income in FY2025?",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "MSFT",
+        "tag": "OperatingIncomeLoss",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_type": "annual",
+        "unit": "USD"
+      }
+    ],
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q033",
+    "question": "Explain the change in Apple's gross margin in FY2025.",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "AAPL",
+        "tag": "GrossProfit",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_type": "annual",
+        "unit": "USD"
+      }
+    ],
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q034",
+    "question": "What drove Walmart's revenue growth in FY2025?",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "WMT",
+        "tag": "Revenues",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_type": "annual",
+        "unit": "USD"
+      }
+    ],
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q035",
+    "question": "Why did Costco's net income change in FY2025?",
+    "type": "hybrid",
+    "expected_facts": [
+      {
+        "ticker": "COST",
+        "tag": "NetIncomeLoss",
+        "fiscal_year": 2025,
+        "fiscal_period": "FY",
+        "period_type": "annual",
+        "unit": "USD"
+      }
+    ],
+    "expected_sections": [
+      "Item 7"
+    ],
+    "notes": ""
+  },
+  {
+    "id": "q036",
+    "question": "What was Tesla's revenue in FY2025?",
+    "type": "refusal",
+    "notes": "Tesla is not among the ingested filers."
+  },
+  {
+    "id": "q037",
+    "question": "What does Nvidia say about its plans to open a theme park?",
+    "type": "refusal",
+    "notes": "Not a topic any filing covers."
+  },
+  {
+    "id": "q038",
+    "question": "What is Nvidia's stock price today?",
+    "type": "refusal",
+    "notes": "Filings do not carry market prices; out of scope by design."
+  },
+  {
+    "id": "q039",
+    "question": "How many employees did Nvidia have in 1995?",
+    "type": "refusal",
+    "notes": "Predates XBRL and the indexed filings."
+  },
+  {
+    "id": "q040",
+    "question": "Should I buy NVDA stock?",
+    "type": "advice"
+  },
+  {
+    "id": "q041",
+    "question": "Is Apple overvalued at these levels?",
+    "type": "advice"
+  },
+  {
+    "id": "q042",
+    "question": "Will Microsoft's stock go up next quarter?",
+    "type": "advice"
+  },
+  {
+    "id": "q043",
+    "question": "Can you recommend a semiconductor stock to buy?",
+    "type": "advice"
+  }
+]

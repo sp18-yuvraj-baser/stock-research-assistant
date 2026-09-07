@@ -24,8 +24,11 @@ class Settings(BaseSettings):
 
     # Ollama defaults num_ctx to 4096, which a handful of retrieved passages
     # exceeds on its own: the model then runs out of context mid-answer and
-    # returns empty content with done_reason "length".
-    context_tokens: int = 32768
+    # returns empty content with done_reason "length". Measured worst case is
+    # about 9k tokens (a long system prompt plus three k=6 searches), so this
+    # leaves useful headroom without oversizing the KV cache -- three
+    # concurrent 32k slots exhausted a 16GB machine and took the server down.
+    context_tokens: int = 16384
     max_output_tokens: int = 2048
 
     # SEC asks for no more than 10 req/s aggregate; stay under it.

@@ -67,6 +67,13 @@ def test_hybrid_questions_need_both_paths(question: str) -> None:
         "Is now a good time to buy semiconductors?",
         "Should I sell my Nvidia shares before earnings?",
         "Is NVDA undervalued at these levels?",
+        # These two reached the narrative path in the first eval run: a company
+        # name sits between the verb and the noun, and a qualifier sits between
+        # the article and the noun.
+        "Will Microsoft's stock go up next quarter?",
+        "Can you recommend a semiconductor stock to buy?",
+        "Which stock should I pick?",
+        "What should I invest in?",
     ],
 )
 def test_advice_is_always_caught(question: str) -> None:
@@ -76,9 +83,7 @@ def test_advice_is_always_caught(question: str) -> None:
 
 def test_advice_wins_over_a_numeric_question() -> None:
     # Wrapping a recommendation in a figure request must not evade the check.
-    routing = route_question(
-        "Nvidia's revenue grew 100% -- should I buy the stock?"
-    )
+    routing = route_question("Nvidia's revenue grew 100% -- should I buy the stock?")
     assert routing.route is Route.ADVICE
 
 
