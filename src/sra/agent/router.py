@@ -102,6 +102,17 @@ _COMPARISON = (
     r"\bversus\b",
 )
 
+# An explicit request to quote what a filing states. "What does Apple's MD&A
+# say about Services revenue" is asking for reported text, not a figure, even
+# though "revenue" also matches a numeric concept below. This framing wins
+# over a bare numeric-concept match; it does not override a genuine causal ask
+# ("why does management say revenue grew"), which still needs both paths.
+_EXPLICIT_QUOTE_FRAME = (
+    r"what does .{0,40}say",
+    r"how does .{0,40}(describe|characterize)",
+    r"what (does|do) .{0,40}(disclose|state)",
+)
+
 # Topics that only filing text covers.
 _NARRATIVE_TOPIC = (
     r"\brisks?\b",
@@ -132,6 +143,22 @@ def _matches(text: str, patterns: tuple[str, ...]) -> list[str]:
     return [p for p in patterns if re.search(p, text, re.IGNORECASE)]
 
 
+# How far into the question a quote-frame match may start and still count as
+# framing the *whole* question. "What does Apple's MD&A say about revenue" has
+# it at position 0; "How did margin change and what does management say" has
+# it well past this, joined to an independent numeric clause by "and" -- that
+# is a genuine hybrid, not a quote request that happens to mention a number.
+_QUOTE_FRAME_LEAD_CHARS = 8
+
+
+def _leads_the_question(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(
+        (m := re.search(p, text, re.IGNORECASE))
+        and m.start() <= _QUOTE_FRAME_LEAD_CHARS
+        for p in patterns
+    )
+
+
 def route_question(question: str) -> Routing:
     """Classify a question, reporting the features that decided it."""
     text = question.strip()
@@ -146,14 +173,24 @@ def route_question(question: str) -> Routing:
     quantity = _matches(text, _QUANTITY)
     comparison = _matches(text, _COMPARISON)
     topic = _matches(text, _NARRATIVE_TOPIC)
+    quote_frame = _matches(text, _EXPLICIT_QUOTE_FRAME)
     numeric = concept + quantity
     if numeric:
         numeric = numeric + comparison
+
+    # "What does X say about revenue" wants the stated text, not the figure --
+    # a numeric concept incidentally named inside the topic does not make this
+    # a numbers question. This only applies when the quote-frame IS the
+    # question: "how did margin change and what does management say" joins an
+    # independent numeric clause to the frame with "and", and stays hybrid.
+    if quote_frame and not causal and _leads_the_question(text, _EXPLICIT_QUOTE_FRAME):
+        numeric = []
 
     reasons = tuple(
         [f"causal:{p}" for p in causal]
         + [f"numeric:{p}" for p in numeric]
         + [f"topic:{p}" for p in topic]
+        + [f"quote_frame:{p}" for p in quote_frame]
     )
 
     if numeric and (causal or topic):

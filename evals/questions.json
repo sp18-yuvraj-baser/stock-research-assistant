@@ -358,7 +358,8 @@
     "question": "What does Apple's MD&A say about Services revenue?",
     "type": "narrative",
     "expected_sections": [
-      "Item 7"
+      "Item 7",
+      "Item 2"
     ],
     "notes": ""
   },

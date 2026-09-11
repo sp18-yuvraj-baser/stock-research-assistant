@@ -33,10 +33,21 @@ def test_numeric_questions(question: str) -> None:
         # "year over year" here frames the comparison of risk factors; it is not
         # a request for a figure.
         "Which risk factors changed year over year for Nvidia?",
+        # A numeric concept named inside a quote-request is not a numbers
+        # question: the fifth eval run routed this to hybrid because "revenue"
+        # matched the numeric-concept list even though the question asks only
+        # for what MD&A states.
+        "What does Apple's MD&A say about Services revenue?",
+        "What does Nvidia disclose about its revenue recognition policy?",
     ],
 )
 def test_narrative_questions(question: str) -> None:
     assert route_question(question).route is Route.NARRATIVE
+
+
+def test_quote_frame_does_not_suppress_a_genuine_causal_ask() -> None:
+    # The quote-frame fix must not blind the router to an actual hybrid need.
+    assert route_question("Why does management say revenue grew?").route is Route.HYBRID
 
 
 @pytest.mark.parametrize(

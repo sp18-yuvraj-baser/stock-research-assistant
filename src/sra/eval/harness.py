@@ -7,16 +7,17 @@ failures re-examined, without paying for another run.
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psycopg
 from psycopg.rows import dict_row
 
 from sra.agent.compose import ask
+from sra.agent.loop import ModelUnavailableError
 from sra.agent.router import Route
 from sra.config import PROJECT_ROOT, settings
 from sra.eval.checks import (
@@ -47,8 +48,8 @@ from sra.eval.spec import (
 
 RESULTS_PATH = PROJECT_ROOT / "evals" / "results.json"
 
-# Enough to cut wall-clock time without thrashing a 32k-context model.
-DEFAULT_WORKERS = 3
+# Runs are sequential by design. Three concurrent requests exhausted memory on
+# a 16GB machine and took the model server down mid-run, twice.
 
 
 @dataclass
@@ -85,7 +86,30 @@ class QuestionResult:
     quoted_spans_verified: int = 0
     refusal_detected: bool = False
     unbalanced_quotes: bool = False
+    # Set when the question never reached an answer -- a crashed model server,
+    # not a quality failure. Scored separately so it cannot be mistaken for one.
+    error: str | None = None
     unresolved_specs: list[str] = field(default_factory=list)
+
+
+# The local model server has dropped mid-run twice under sustained load on a
+# 16GB machine. One wait-and-retry turns a lost run into a slow one.
+SERVER_RECOVERY_SECONDS = 120
+SERVER_POLL_SECONDS = 5
+
+
+def _wait_for_model_server() -> bool:
+    """Poll the model server until it answers, up to the recovery budget."""
+    deadline = time.monotonic() + SERVER_RECOVERY_SECONDS
+    url = f"{settings().ollama_url}/api/tags"
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(url, timeout=10.0).status_code == 200:
+                return True
+        except httpx.HTTPError:
+            pass
+        time.sleep(SERVER_POLL_SECONDS)
+    return False
 
 
 def _evaluate(question: EvalQuestion) -> QuestionResult:
@@ -95,16 +119,22 @@ def _evaluate(question: EvalQuestion) -> QuestionResult:
     the harness useless exactly when something is broken.
     """
     try:
-        return _evaluate_once(question)
+        try:
+            return _evaluate_once(question)
+        except ModelUnavailableError:
+            if not _wait_for_model_server():
+                raise
+            return _evaluate_once(question)
     except Exception as exc:
         return QuestionResult(
             id=question.id,
             question=question.question,
             kind=question.kind,
             route="error",
-            answer=f"ERROR: {type(exc).__name__}: {exc}",
+            answer="",
             latency_seconds=0.0,
             stopped_early=True,
+            error=f"{type(exc).__name__}: {exc}",
         )
 
 
@@ -206,32 +236,60 @@ def _evaluate_once(question: EvalQuestion) -> QuestionResult:
     return result
 
 
+class StaleResultsError(RuntimeError):
+    """Stored results predate the evidence fields scoring now needs."""
+
+
+def _write_results(target: Path, results: dict[str, QuestionResult]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    ordered = [results[key] for key in sorted(results)]
+    target.write_text(
+        json.dumps([asdict(r) for r in ordered], indent=2) + "\n", encoding="utf-8"
+    )
+
+
 def run_eval(
     *,
     only: list[str] | None = None,
-    workers: int = DEFAULT_WORKERS,
     path: Path | None = None,
+    resume: bool = False,
+    max_seconds: float | None = None,
 ) -> list[QuestionResult]:
-    """Answer every question and record what came back."""
+    """Answer every question, persisting after each one.
+
+    A full run takes over half an hour, and one has already been lost whole to
+    a process teardown. Writing after every question means an interrupted run
+    resumes where it stopped rather than starting over, and max_seconds lets a
+    run be taken in bounded stretches.
+    """
     questions = load_questions()
     if only:
         wanted = {q.lower() for q in only}
         questions = [
             q for q in questions if q.id.lower() in wanted or q.kind.lower() in wanted
         ]
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        results = list(pool.map(_evaluate, questions))
-    results.sort(key=lambda r: r.id)
+
     target = path or RESULTS_PATH
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        json.dumps([asdict(r) for r in results], indent=2) + "\n", encoding="utf-8"
-    )
-    return results
+    done: dict[str, QuestionResult] = {}
+    if resume and target.exists():
+        try:
+            done = {r.id: r for r in load_results(target)}
+        except StaleResultsError:
+            # An older file cannot be merged with new evidence fields; start over.
+            done = {}
 
+    started = time.monotonic()
+    for question in questions:
+        previous = done.get(question.id)
+        # A question that errored last time is retried; one that answered is not.
+        if previous is not None and previous.error is None:
+            continue
+        done[question.id] = _evaluate(question)
+        _write_results(target, done)
+        if max_seconds is not None and time.monotonic() - started >= max_seconds:
+            break
 
-class StaleResultsError(RuntimeError):
-    """Stored results predate the evidence fields scoring now needs."""
+    return [done[key] for key in sorted(done)]
 
 
 def load_results(path: Path | None = None) -> list[QuestionResult]:
@@ -273,8 +331,18 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
+def _errored(result: QuestionResult) -> bool:
+    """Whether the question never produced an answer."""
+    return result.error is not None or result.route == "error"
+
+
 def _verdicts(result: QuestionResult) -> list[dict[str, Any]]:
     """Re-classify a stored answer's figures against its stored evidence."""
+    if _errored(result):
+        # An error message is not an answer. Extracting figures from one turned
+        # the port number in "cannot reach ... localhost:11434" into seventeen
+        # reported hallucinations.
+        return []
     values: set[Decimal] = set()
     for raw in result.sql_values:
         try:
@@ -292,10 +360,32 @@ def _verdicts(result: QuestionResult) -> list[dict[str, Any]]:
     ]
 
 
-def score(results: list[QuestionResult]) -> tuple[list[Metric], list[str]]:
-    """Compute the scoreboard and itemise every failure."""
+def score(
+    all_results: list[QuestionResult],
+) -> tuple[list[Metric], list[str]]:
+    """Compute the scoreboard and itemise every failure.
+
+    Quality metrics cover only the questions that produced an answer. A
+    crashed model server is an infrastructure failure, and averaging it into
+    the quality metrics reports a collapse in answer quality that did not
+    happen.
+    """
     failures: list[str] = []
     metrics: list[Metric] = []
+
+    errored = [r for r in all_results if _errored(r)]
+    results = [r for r in all_results if not _errored(r)]
+
+    metrics.append(
+        Metric(
+            "questions that produced an answer",
+            len(results),
+            len(all_results),
+            "a crashed or unreachable model server",
+        )
+    )
+    for r in errored:
+        failures.append(f"{r.id} never answered: {r.error or 'unknown error'}")
 
     # Figures are re-derived here rather than trusted from the run, so a
     # correction to the extractor takes effect without another run.
@@ -307,6 +397,17 @@ def score(results: list[QuestionResult]) -> tuple[list[Metric], list[str]]:
             result.quoted_spans_verified = sum(
                 1 for span in spans if quote_is_supported(span, result.passages)
             )
+
+    # expected_sections is re-read from the current question set too: a
+    # correction to an eval question's spec (e.g. widening which Item numbers
+    # legitimately answer it) should not require re-running the model, since
+    # retrieved_sections is the raw evidence and the expectation is the only
+    # thing that changed.
+    current_expected = {q.id: q.expected_sections for q in load_questions()}
+    for result in results:
+        expected = current_expected.get(result.id, result.expected_sections)
+        result.expected_sections = expected
+        result.sections_matched = sections_hit(expected, result.retrieved_sections)
 
     # Headline: a figure in an answer that traces to no evidence at all.
     clean_answers = [
@@ -489,8 +590,10 @@ def score(results: list[QuestionResult]) -> tuple[list[Metric], list[str]]:
     return metrics, failures
 
 
-def format_scoreboard(results: list[QuestionResult]) -> str:
-    metrics, failures = score(results)
+def format_scoreboard(all_results: list[QuestionResult]) -> str:
+    metrics, failures = score(all_results)
+    results = [r for r in all_results if not _errored(r)]
+    errored = len(all_results) - len(results)
     figures = [f for r in results if r.figures for f in r.figures]
     buckets = {
         status: sum(1 for f in figures if f["status"] == status)
@@ -498,7 +601,14 @@ def format_scoreboard(results: list[QuestionResult]) -> str:
     }
     latencies = [r.latency_seconds for r in results]
 
-    lines = [f"{len(results)} questions", ""]
+    lines = [f"{len(all_results)} questions"]
+    if errored:
+        lines.append(
+            f"WARNING: {errored} never answered (model server unreachable). "
+            f"Metrics below cover the {len(results)} that did -- this run is "
+            "not a valid baseline."
+        )
+    lines.append("")
     width = max(len(m.name) for m in metrics)
     for metric in metrics:
         bar = f"{metric.passed}/{metric.total}"

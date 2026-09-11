@@ -79,7 +79,11 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
 def _cmd_eval_run(args: argparse.Namespace) -> int:
     started = time.monotonic()
-    results = run_eval(only=args.only or None, workers=args.workers)
+    results = run_eval(
+        only=args.only or None,
+        resume=args.resume,
+        max_seconds=args.max_seconds,
+    )
     elapsed = time.monotonic() - started
     print(f"ran {len(results)} questions in {elapsed:.0f}s\n")
     print(format_scoreboard(results))
@@ -140,7 +144,17 @@ def build_parser() -> argparse.ArgumentParser:
     eval_run.add_argument(
         "--only", nargs="*", help="question ids or types to run, e.g. numeric q001"
     )
-    eval_run.add_argument("--workers", type=int, default=3)
+    eval_run.add_argument(
+        "--resume",
+        action="store_true",
+        help="keep answers already stored and retry only what is missing",
+    )
+    eval_run.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        help="stop after this long, leaving the rest for a --resume run",
+    )
     eval_run.set_defaults(func=_cmd_eval_run)
 
     eval_score = eval_sub.add_parser(

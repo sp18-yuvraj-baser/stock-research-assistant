@@ -9,6 +9,22 @@ from sra.narrative.embeddings import embed_query
 DEFAULT_K = 6
 MAX_K = 20
 
+# Common abbreviations the model reaches for that do not appear verbatim in
+# the canonical section labels (see narrative/items.py), so a substring filter
+# on them silently matches zero rows. Observed: "MD&A" against
+# "Management's Discussion and Analysis" filtered out every passage even
+# though the ticker and topic were both correct.
+_SECTION_ALIASES: dict[str, str] = {
+    "md&a": "discussion and analysis",
+    "mdna": "discussion and analysis",
+}
+
+
+def _normalize_section(section: str) -> str:
+    key = section.strip().lower()
+    return _SECTION_ALIASES.get(key, section)
+
+
 SEARCH = """
 SELECT c.ticker,
        f.form_type,
@@ -75,6 +91,7 @@ def search_filings(
     """Nearest-neighbour search over filing text, filtered by filer and section."""
     if not query.strip():
         return SearchResult(query=query, error="empty query")
+    section = _normalize_section(section) if section else section
     vector = embed_query(query)
     literal = "[" + ",".join(repr(x) for x in vector) + "]"
     try:
