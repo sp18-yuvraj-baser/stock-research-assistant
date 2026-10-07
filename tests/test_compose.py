@@ -1,7 +1,9 @@
 from sra.agent.compose import (
     ADVICE_REFUSAL,
+    ADVICE_REFUSAL_INDIAN,
     FIGURES_HEADING,
     NARRATIVE_HEADING,
+    ask,
     compose_hybrid,
 )
 from sra.agent.loop import PathResult
@@ -98,3 +100,17 @@ def test_empty_narrative_path_says_so() -> None:
 def test_advice_refusal_offers_an_alternative() -> None:
     assert "not investment advice" in ADVICE_REFUSAL
     assert "What it can do instead" in ADVICE_REFUSAL
+
+
+def test_advice_about_a_sec_filer_gets_the_filings_refusal() -> None:
+    answer = ask("Is Nvidia a good investment right now?")
+    assert answer.text == ADVICE_REFUSAL
+
+
+def test_advice_about_a_tracked_nse_ticker_gets_the_indian_refusal() -> None:
+    answer = ask("Is TCS a good buy right now?")
+    assert answer.text == ADVICE_REFUSAL_INDIAN
+    assert "live last-traded price" in answer.text
+    assert "fundamentals" in answer.text
+    # The SEC-filing offers don't apply to an Indian equity with no filings.
+    assert "XBRL" not in answer.text

@@ -112,3 +112,60 @@ def test_unrecognised_question_defaults_to_filing_text() -> None:
 
 def test_empty_question_does_not_crash() -> None:
     assert route_question("   ").route is Route.NARRATIVE
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What's TCS trading at right now?",
+        "What is the current price of Infosys?",
+        "What's RELIANCE's LTP?",
+    ],
+)
+def test_realtime_questions(question: str) -> None:
+    assert route_question(question).route is Route.REALTIME
+
+
+def test_advice_about_an_indian_ticker_still_wins() -> None:
+    # Mentioning a tracked NSE ticker must not let price-ask phrasing evade
+    # the advice check -- ADVICE is checked first and unconditionally.
+    assert route_question("Is TCS a good buy right now?").route is Route.ADVICE
+    assert route_question("What is TCS's price target?").route is Route.ADVICE
+
+
+def test_realtime_requires_a_tracked_indian_instrument() -> None:
+    # "Trading at right now" alone must not misroute here: there is no
+    # Upstox coverage for Nvidia, so this has to fall through to the
+    # existing default rather than claim a live quote it cannot produce.
+    assert (
+        route_question("What's Nvidia trading at right now?").route
+        is not Route.REALTIME
+    )
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What is HDFC Bank's P/E ratio?",
+        "Show Infosys revenue growth for 5 years.",
+        "What is the latest quarterly result of TCS?",
+        "Which Nifty 50 stocks have ROE > 20%?",
+        "Compare TCS vs Infosys.",
+        "Analyze TCS fundamentally.",
+    ],
+)
+def test_fundamentals_questions(question: str) -> None:
+    assert route_question(question).route is Route.FUNDAMENTALS
+
+
+def test_advice_about_tata_motors_still_wins_over_fundamentals() -> None:
+    # "overvalued" must keep catching this even though Tata Motors is now a
+    # tracked ticker -- ADVICE is checked before FUNDAMENTALS too.
+    assert route_question("Is Tata Motors overvalued?").route is Route.ADVICE
+
+
+def test_fundamentals_requires_a_tracked_indian_instrument_or_nifty_scope() -> None:
+    # "P/E ratio" alone must not misroute here: there is no Upstox
+    # fundamentals coverage for Apple, so this has to fall through rather
+    # than invent a ratio it cannot produce.
+    assert route_question("What is Apple's P/E ratio?").route is not Route.FUNDAMENTALS

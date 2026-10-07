@@ -18,6 +18,8 @@ class Route(StrEnum):
     NARRATIVE = "narrative"
     HYBRID = "hybrid"
     ADVICE = "advice"
+    REALTIME = "realtime"
+    FUNDAMENTALS = "fundamentals"
 
 
 @dataclass(frozen=True)
@@ -139,8 +141,144 @@ _NARRATIVE_TOPIC = (
 )
 
 
+# Live-price phrasing for the NSE/BSE realtime-quote path. Distinct from
+# _ADVICE's "price target"/"good buy" framing: this asks what a stock IS
+# trading at right now, not what it SHOULD be worth or whether to act on it.
+_REALTIME_PRICE = (
+    r"trading at",
+    r"\bcurrent price\b",
+    r"\blive price\b",
+    r"\bltp\b",  # NSE/Upstox jargon for last traded price
+    r"what('s| is) .{0,30}(price|quote) (right now|currently|today)",
+    r"\bprice right now\b",
+)
+
+# Required alongside _REALTIME_PRICE: without an explicit signal that the
+# question is about the NSE/BSE universe, "what's it trading at right now"
+# about Nvidia would misroute here, where there is no NVDA coverage at all.
+# Ticker symbol is the primary signal for all 50; a handful of well-known
+# companies also get a common-name alias. Best-effort, not exhaustive --
+# same coverage tradeoff as every other pattern family in this module. Kept
+# in sync with ingest.instruments_run.DEFAULT_NSE_TICKERS.
+_INDIAN_INSTRUMENT = (
+    r"\breliance\b",
+    r"\bril\b",
+    r"\btcs\b",
+    r"\btata consultancy\b",
+    r"\bhdfc ?bank\b",
+    r"\bicici ?bank\b",
+    r"\binfosys\b",
+    r"\binfy\b",
+    r"\bhindunilvr\b",
+    r"\bhindustan unilever\b",
+    r"\bitc\b",
+    r"\bsbin\b",
+    r"\bstate bank of india\b",
+    r"\bbharti ?airtel\b",
+    r"\bbajfinance\b",
+    r"\bbajaj finance\b",
+    r"\bkotak ?(mahindra)? ?bank\b",
+    r"\blt\b",
+    r"\blarsen ?(and|&) ?toubro\b",
+    r"\bhcltech\b",
+    r"\bhcl technologies\b",
+    r"\baxis ?bank\b",
+    r"\bmaruti\b",
+    r"\bsun pharma\b",
+    r"\basian ?paints\b",
+    r"\btitan\b",
+    r"\bultratech\b",
+    r"\bwipro\b",
+    r"\bnestle ?india\b",
+    r"\badani ?enterprises\b|\badanient\b",
+    r"\badani ?ports\b",
+    r"\btata motors\b|\btmpv\b|\btmcv\b",
+    r"\btata steel\b",
+    r"\bpower ?grid\b",
+    r"\bntpc\b",
+    r"\bm&m\b|\bmahindra ?(and|&) ?mahindra\b",
+    r"\bbajaj finserv\b",
+    r"\bjsw steel\b",
+    r"\btech mahindra\b",
+    r"\bhdfc life\b",
+    r"\bsbi life\b",
+    r"\bgrasim\b",
+    r"\bcipla\b",
+    r"\bdr\.? ?reddy'?s?\b",
+    r"\bbritannia\b",
+    r"\beicher motors\b",
+    r"\bcoal india\b",
+    r"\bdivi'?s? ?lab\b",
+    r"\bapollo hospitals?\b",
+    r"\bhero motocorp\b",
+    r"\bbpcl\b",
+    r"\bongc\b",
+    r"\bshriram finance\b",
+    r"\bindusind ?bank\b",
+    r"\btata consumer\b",
+    r"\bupl\b",
+    r"\bhindalco\b",
+    r"\bbajaj ?auto\b",
+    r"\btrent\b",
+    r"\bjio financial\b|\bjiofin\b",
+    r"\bnse\b",
+    r"\bbse\b",
+)
+
+# Fundamentals concepts: ratios, financial-statement categories, and
+# screening phrasing. Checked alongside _INDIAN_INSTRUMENT or _NIFTY_SCOPE --
+# a screening question often names no specific company at all ("which Nifty
+# 50 stocks have ROE > 20%"), so the scope gate is wider than REALTIME's.
+_FUNDAMENTALS_CONCEPT = (
+    r"\bp/?e\b",
+    r"price.to.earnings",
+    r"\broe\b",
+    r"\broce\b",
+    r"\broa\b",
+    r"ev/ebitda",
+    r"\bp/?b\b",
+    r"price.to.book",
+    r"\bfundamentals?\b",
+    r"\bfundamentally\b",
+    # "Compare TCS vs Infosys" names no ratio by itself, but two tracked
+    # tickers plus "compare" has nothing else it could mean here -- there is
+    # no Indian filing-text corpus to compare instead.
+    r"\bcompare\b",
+    r"\bvs\.?\b",
+    r"revenue growth",
+    r"quarterly results?",
+    r"financial results?",
+    r"net profit",
+    r"operating profit",
+    r"balance sheet",
+    r"income statement",
+)
+
+_SCREENING = (
+    r"\bwhich stocks\b",
+    r"\bfind .{0,20}stocks\b",
+    r"\bscreen\b",
+    r"\bstocks with\b",
+)
+
+_NIFTY_SCOPE = (
+    r"\bnifty\s?50\b",
+    r"\bnifty\b",
+)
+
+
 def _matches(text: str, patterns: tuple[str, ...]) -> list[str]:
     return [p for p in patterns if re.search(p, text, re.IGNORECASE)]
+
+
+def mentions_tracked_instrument(question: str) -> bool:
+    """Whether a question names one of the NSE tickers this tool tracks.
+
+    Used outside routing too: an ADVICE question about TCS still needs the
+    decline, but the alternatives it offers should be the live-quote path,
+    not SEC-filing offers that do not exist for an Indian equity.
+    """
+    return bool(_matches(question, _INDIAN_INSTRUMENT))
 
 
 # How far into the question a quote-frame match may start and still count as
@@ -167,6 +305,24 @@ def route_question(question: str) -> Routing:
 
     if advice := _matches(text, _ADVICE):
         return Routing(route=Route.ADVICE, reasons=tuple(f"advice:{p}" for p in advice))
+
+    realtime_price = _matches(text, _REALTIME_PRICE)
+    realtime_instrument = _matches(text, _INDIAN_INSTRUMENT)
+    if realtime_price and realtime_instrument:
+        reasons = tuple(f"realtime:{p}" for p in realtime_price) + tuple(
+            f"instrument:{p}" for p in realtime_instrument
+        )
+        return Routing(route=Route.REALTIME, reasons=reasons)
+
+    fundamentals_concept = _matches(text, _FUNDAMENTALS_CONCEPT) or _matches(
+        text, _SCREENING
+    )
+    fundamentals_scope = realtime_instrument or _matches(text, _NIFTY_SCOPE)
+    if fundamentals_concept and fundamentals_scope:
+        reasons = tuple(f"fundamentals:{p}" for p in fundamentals_concept) + tuple(
+            f"instrument:{p}" for p in fundamentals_scope
+        )
+        return Routing(route=Route.FUNDAMENTALS, reasons=reasons)
 
     causal = _matches(text, _CAUSAL)
     concept = _matches(text, _NUMERIC_CONCEPT)

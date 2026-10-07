@@ -5,12 +5,16 @@ from typing import Any
 import httpx
 
 from sra.agent.prompts import (
+    FUNDAMENTALS_SYSTEM_PROMPT,
+    LIVE_QUOTE_TOOL,
     NARRATIVE_SYSTEM_PROMPT,
     NUMERIC_SYSTEM_PROMPT,
+    REALTIME_SYSTEM_PROMPT,
     RUN_SQL_TOOL,
     SEARCH_FILINGS_TOOL,
 )
 from sra.config import settings
+from sra.tools.get_live_quote import LiveQuote, get_live_quote
 from sra.tools.run_sql import SqlResult, run_sql
 from sra.tools.search_filings import DEFAULT_K, SearchResult, search_filings
 
@@ -29,6 +33,7 @@ class PathResult:
     text: str = ""
     sql_calls: list[SqlResult] = field(default_factory=list)
     search_calls: list[SearchResult] = field(default_factory=list)
+    quote_calls: list[LiveQuote] = field(default_factory=list)
     rounds: int = 0
     stopped_early: bool = False
 
@@ -72,14 +77,19 @@ class PathResult:
 
     @property
     def cited_values(self) -> set[str]:
-        """Every value run_sql returned, for the hallucinated-number check."""
-        return {
+        """Every value run_sql or get_live_quote returned, for the
+        hallucinated-number check."""
+        sql_values = {
             str(value)
             for call in self.sql_calls
             for row in call.rows
             for value in row.values()
             if value is not None
         }
+        quote_values = {
+            str(q.last_price) for q in self.quote_calls if q.last_price is not None
+        }
+        return sql_values | quote_values
 
     @property
     def cited_sections(self) -> set[tuple[str, str]]:
@@ -185,6 +195,10 @@ def _dispatch(name: str, arguments: dict[str, Any], result: PathResult) -> str:
         )
         result.search_calls.append(found)
         return found.to_text()
+    if name == "get_live_quote":
+        quote = get_live_quote(str(arguments.get("ticker", "")))
+        result.quote_calls.append(quote)
+        return quote.to_text()
     # A path is given only its own tool, so this means the model invented one.
     return f"ERROR: no tool named {name!r} is available"
 
@@ -263,5 +277,31 @@ def narrative_path(question: str, **kwargs: Any) -> PathResult:
         question,
         system_prompt=NARRATIVE_SYSTEM_PROMPT,
         tools=[SEARCH_FILINGS_TOOL],
+        **kwargs,
+    )
+
+
+def realtime_path(question: str, **kwargs: Any) -> PathResult:
+    """Live NSE/BSE equity prices only. No SEC/XBRL or filing-text access."""
+    return run_path(
+        question,
+        system_prompt=REALTIME_SYSTEM_PROMPT,
+        tools=[LIVE_QUOTE_TOOL],
+        **kwargs,
+    )
+
+
+def fundamentals_path(question: str, **kwargs: Any) -> PathResult:
+    """Nifty 50 ratios and financials only, via run_sql against those tables.
+
+    Reuses the same run_sql tool the NUMERIC path uses: the tool itself is
+    schema-agnostic (sql_guard only validates that the SQL is a single
+    read-only statement), so a different system prompt describing a
+    different schema is all a new SQL-backed path needs.
+    """
+    return run_path(
+        question,
+        system_prompt=FUNDAMENTALS_SYSTEM_PROMPT,
+        tools=[RUN_SQL_TOOL],
         **kwargs,
     )

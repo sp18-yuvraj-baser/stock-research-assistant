@@ -10,8 +10,14 @@ narrative path quietly filling the gap.
 
 from dataclasses import dataclass, field
 
-from sra.agent.loop import PathResult, narrative_path, numeric_path
-from sra.agent.router import Route, Routing, route_question
+from sra.agent.loop import (
+    PathResult,
+    fundamentals_path,
+    narrative_path,
+    numeric_path,
+    realtime_path,
+)
+from sra.agent.router import Route, Routing, mentions_tracked_instrument, route_question
 
 FIGURES_HEADING = "Figures — from XBRL facts, queried directly"
 NARRATIVE_HEADING = "What the filings say — from filing text"
@@ -32,6 +38,20 @@ What it can do instead:
 
 Ask any of those about a company and period and it will answer with citations."""
 
+# A tracked NSE ticker (Nifty 50) has no SEC filings or MD&A to offer instead
+# -- the SEC-filing alternatives above would be irrelevant, so this universe
+# gets its own refusal, naming what it *can* do: live price and fundamentals.
+ADVICE_REFUSAL_INDIAN = """\
+This is a data tool for a fixed set of Nifty 50 Indian equities, not
+investment advice, so it will not recommend buying, selling or holding
+anything, and it has no view on price.
+
+What it can do instead:
+  - show the current live last-traded price, fetched from Upstox right now
+  - show fundamentals: P/E, P/B, ROE, ROCE, revenue and profit over time
+
+Ask for either directly and it will answer with real figures and a timestamp."""
+
 
 @dataclass
 class Answer:
@@ -40,6 +60,8 @@ class Answer:
     text: str = ""
     numeric: PathResult | None = None
     narrative: PathResult | None = None
+    realtime: PathResult | None = None
+    fundamentals: PathResult | None = None
     paths: list[PathResult] = field(default_factory=list)
 
     @property
@@ -131,7 +153,28 @@ def ask(question: str, *, max_rounds: int | None = None) -> Answer:
     kwargs = {} if max_rounds is None else {"max_rounds": max_rounds}
 
     if routing.route is Route.ADVICE:
-        answer.text = ADVICE_REFUSAL
+        answer.text = (
+            ADVICE_REFUSAL_INDIAN
+            if mentions_tracked_instrument(question)
+            else ADVICE_REFUSAL
+        )
+        return answer
+
+    if routing.route is Route.REALTIME:
+        # Never combined with NUMERIC/NARRATIVE: there is no Indian filing-text
+        # corpus to blend a live quote with, and compose_hybrid's alignment
+        # check is specific to SEC accession numbers.
+        answer.realtime = realtime_path(question, **kwargs)
+        answer.paths.append(answer.realtime)
+        answer.text = answer.realtime.text
+        return answer
+
+    if routing.route is Route.FUNDAMENTALS:
+        # Also standalone: no Indian filing-text corpus or live price in this
+        # path, so there is nothing to cross-check it against.
+        answer.fundamentals = fundamentals_path(question, **kwargs)
+        answer.paths.append(answer.fundamentals)
+        answer.text = answer.fundamentals.text
         return answer
 
     if routing.route in (Route.NUMERIC, Route.HYBRID):

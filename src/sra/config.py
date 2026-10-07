@@ -36,6 +36,19 @@ class Settings(BaseSettings):
     cache_dir: Path = Field(default=PROJECT_ROOT / ".cache")
     sql_row_limit: int = 200
 
+    # Upstox (NSE/BSE live quotes). All optional with safe defaults so an
+    # existing .env with no Upstox creds leaves every other command unchanged.
+    #
+    # Upstox's Analytics Token is a read-only, 1-year-validity token scoped to
+    # Market Data -- exactly this tool's use case -- so it is preferred over
+    # the standard OAuth2 access token, which must be refreshed daily through
+    # an interactive browser consent step (see `sra upstox login`).
+    upstox_analytics_token: str = ""
+    upstox_api_key: str = ""
+    upstox_api_secret: str = ""
+    upstox_redirect_uri: str = "https://127.0.0.1/callback"
+    upstox_max_requests_per_second: float = 5.0
+
 
 @lru_cache(maxsize=1)
 def settings() -> Settings:
