@@ -1,8 +1,11 @@
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from sra.ingest.fundamentals_run import (
     _balance_sheet_rows,
     _income_statement_rows,
+    _is_stale,
     _parse_ratio_value,
     _ratio_rows,
 )
@@ -91,3 +94,17 @@ def test_balance_sheet_rows_pivots_flat_history_into_categories() -> None:
             "value": 2000,
         },
     ]
+
+
+def test_missing_data_is_stale() -> None:
+    assert _is_stale(None, ttl_seconds=3600) is True
+
+
+def test_fresh_data_is_not_stale() -> None:
+    fetched_at = datetime.now(UTC) - timedelta(minutes=5)
+    assert _is_stale(fetched_at, ttl_seconds=3600) is False
+
+
+def test_expired_data_is_stale() -> None:
+    fetched_at = datetime.now(UTC) - timedelta(hours=2)
+    assert _is_stale(fetched_at, ttl_seconds=3600) is True

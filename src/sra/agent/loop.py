@@ -14,6 +14,7 @@ from sra.agent.prompts import (
     SEARCH_FILINGS_TOOL,
 )
 from sra.config import settings
+from sra.ingest.fundamentals_run import ensure_fresh_fundamentals
 from sra.tools.get_live_quote import LiveQuote, get_live_quote
 from sra.tools.run_sql import SqlResult, run_sql
 from sra.tools.search_filings import DEFAULT_K, SearchResult, search_filings
@@ -298,7 +299,12 @@ def fundamentals_path(question: str, **kwargs: Any) -> PathResult:
     schema-agnostic (sql_guard only validates that the SQL is a single
     read-only statement), so a different system prompt describing a
     different schema is all a new SQL-backed path needs.
+
+    Refreshes stale fundamentals from Upstox first (see
+    ensure_fresh_fundamentals), so the model always queries data no older
+    than the configured TTL rather than requiring a separate manual ingest.
     """
+    ensure_fresh_fundamentals()
     return run_path(
         question,
         system_prompt=FUNDAMENTALS_SYSTEM_PROMPT,

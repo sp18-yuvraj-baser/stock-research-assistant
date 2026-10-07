@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     upstox_redirect_uri: str = "https://127.0.0.1/callback"
     upstox_max_requests_per_second: float = 5.0
 
+    # Fundamentals (P/E, ROE, revenue, ...) are refreshed from Upstox live
+    # whenever the stored copy is older than this, rather than requiring a
+    # separate manual ingest step -- see ensure_fresh_fundamentals().
+    upstox_fundamentals_ttl_seconds: int = 3600
+
 
 @lru_cache(maxsize=1)
 def settings() -> Settings:

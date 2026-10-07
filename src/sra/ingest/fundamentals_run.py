@@ -190,3 +190,29 @@ def ingest_fundamentals(
                 FundamentalsIngestReport(ticker, len(ratio_rows), len(financial_rows))
             )
     return reports
+
+
+def _is_stale(oldest_fetched_at: datetime | None, *, ttl_seconds: int) -> bool:
+    """No data at all, or the oldest tracked row is past its TTL."""
+    if oldest_fetched_at is None:
+        return True
+    return (datetime.now(UTC) - oldest_fetched_at).total_seconds() > ttl_seconds
+
+
+def ensure_fresh_fundamentals(tickers: list[str] | None = None) -> bool:
+    """Refresh fundamentals from Upstox if the oldest tracked row is stale.
+
+    Called automatically before answering a fundamentals question (see
+    agent/loop.py's fundamentals_path), rather than requiring a separate
+    manual `sra upstox ingest-fundamentals` run: a question always gets data
+    no older than SRA_UPSTOX_FUNDAMENTALS_TTL_SECONDS, fetched live when
+    needed and otherwise read from Postgres at no API cost. Returns whether a
+    refresh actually ran.
+    """
+    with psycopg.connect(settings().readonly_dsn) as conn:
+        row = conn.execute("SELECT min(fetched_at) FROM fundamental_ratios").fetchone()
+    oldest = row[0] if row is not None else None
+    if not _is_stale(oldest, ttl_seconds=settings().upstox_fundamentals_ttl_seconds):
+        return False
+    ingest_fundamentals(tickers)
+    return True
