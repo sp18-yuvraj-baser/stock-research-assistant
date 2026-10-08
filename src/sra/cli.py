@@ -4,16 +4,22 @@ import time
 
 from sra.agent.compose import ask
 from sra.agent.loop import OllamaError
+from sra.config import settings
 from sra.eval.harness import (
     StaleResultsError,
     format_scoreboard,
     load_results,
     run_eval,
 )
+from sra.ingest.fundamentals_run import ingest_fundamentals
+from sra.ingest.instruments_run import DEFAULT_NSE_TICKERS, ingest_instruments
 from sra.ingest.narrative_run import index_narrative
 from sra.ingest.run import DEFAULT_TICKERS, ingest_tickers
 from sra.migrate import apply_migrations
 from sra.narrative.embeddings import EmbeddingError
+from sra.upstox.auth import authorize_url, exchange_code
+from sra.upstox.client import UpstoxError
+from sra.upstox.instruments import UnknownInstrumentError
 
 
 def _cmd_migrate(_args: argparse.Namespace) -> int:
@@ -50,6 +56,36 @@ def _cmd_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_upstox_login(_args: argparse.Namespace) -> int:
+    cfg = settings()
+    url = authorize_url(
+        api_key=cfg.upstox_api_key, redirect_uri=cfg.upstox_redirect_uri
+    )
+    print(f"Open this URL, log in, and approve access:\n\n  {url}\n")
+    print("Your browser will redirect with a `code` query parameter. Paste it here:")
+    token = exchange_code(input("code: ").strip())
+    print(
+        f"Saved. Obtained at {token.obtained_at.isoformat()}; "
+        "re-run `sra upstox login` daily (Upstox tokens expire each day)."
+    )
+    return 0
+
+
+def _cmd_upstox_ingest_instruments(args: argparse.Namespace) -> int:
+    reports = ingest_instruments(args.tickers or None, refresh=args.refresh)
+    for r in reports:
+        print(f"{r.ticker:<10}{r.exchange:<10}{r.instrument_key}")
+    return 0
+
+
+def _cmd_upstox_ingest_fundamentals(args: argparse.Namespace) -> int:
+    reports = ingest_fundamentals(args.tickers or None)
+    print(f"{'ticker':<10}{'ratios':>8}{'financials':>12}")
+    for r in reports:
+        print(f"{r.ticker:<10}{r.ratios:>8}{r.financials:>12}")
+    return 0
+
+
 def _cmd_ask(args: argparse.Namespace) -> int:
     answer = ask(" ".join(args.question))
     if args.explain:
@@ -66,6 +102,8 @@ def _cmd_ask(args: argparse.Namespace) -> int:
                     for passage in search.passages
                 )
                 print(f"--- search {i} ---\n{search.query}\n{found}\n")
+            for i, quote in enumerate(path.quote_calls, start=1):
+                print(f"--- quote {i} ---\n{quote.to_text()}\n")
     print(answer.text)
     queries = sum(len(p.sql_calls) for p in answer.paths)
     searches = sum(len(p.search_calls) for p in answer.paths)
@@ -135,6 +173,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_cmd.set_defaults(func=_cmd_ask)
 
+    upstox = sub.add_parser("upstox", help="Upstox (NSE/BSE live quotes) integration")
+    upstox_sub = upstox.add_subparsers(dest="upstox_command", required=True)
+
+    upstox_login = upstox_sub.add_parser(
+        "login", help="authorize and cache a daily Upstox access token"
+    )
+    upstox_login.set_defaults(func=_cmd_upstox_login)
+
+    upstox_ingest = upstox_sub.add_parser(
+        "ingest-instruments", help="resolve NSE tickers to Upstox instrument keys"
+    )
+    upstox_ingest.add_argument(
+        "tickers", nargs="*", help=f"default: {' '.join(DEFAULT_NSE_TICKERS)}"
+    )
+    upstox_ingest.add_argument(
+        "--refresh", action="store_true", help="bypass the instrument-master cache"
+    )
+    upstox_ingest.set_defaults(func=_cmd_upstox_ingest_instruments)
+
+    upstox_fund = upstox_sub.add_parser(
+        "ingest-fundamentals",
+        help="ingest P/E, ROE, revenue etc. for tracked tickers",
+    )
+    upstox_fund.add_argument(
+        "tickers",
+        nargs="*",
+        help=f"default: all tracked ({len(DEFAULT_NSE_TICKERS)} tickers)",
+    )
+    upstox_fund.set_defaults(func=_cmd_upstox_ingest_fundamentals)
+
     evaluate = sub.add_parser("eval", help="run or score the eval set")
     eval_sub = evaluate.add_subparsers(dest="eval_command", required=True)
 
@@ -169,7 +237,13 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args))
-    except (OllamaError, EmbeddingError, StaleResultsError) as exc:
+    except (
+        OllamaError,
+        EmbeddingError,
+        StaleResultsError,
+        UpstoxError,
+        UnknownInstrumentError,
+    ) as exc:
         # An unreachable local model is the most common setup failure; a
         # traceback tells the user nothing they can act on.
         print(f"error: {exc}", file=sys.stderr)
