@@ -84,6 +84,15 @@ _NUMERIC_CONCEPT = (
     r"\bdividends?\b",
     r"\bmargins?\b",
     r"\bbalance sheet\b",
+    # Deliberately NOT widened with generic "report"/"analyze"/"overview"/
+    # "financials" the way the Indian FUNDAMENTALS path was: tested live,
+    # a broad multi-tag report question routed here reliably produced
+    # 1000x-inflated dollar figures (qwen2.5:7b combining several tags in
+    # one tag IN (...) query and retyping large numbers from memory) across
+    # three rounds of increasingly explicit prompt fixes. The narrative
+    # path's fallback for the same question is safe (verified: a real,
+    # citation-backed MD&A answer, zero fabrication) -- falling through to
+    # it is the correct behavior here, not a gap to close.
 )
 
 # Quantity phrasing without a named concept, e.g. "how much did it spend".
@@ -252,6 +261,26 @@ _FUNDAMENTALS_CONCEPT = (
     r"operating profit",
     r"balance sheet",
     r"income statement",
+    # Broad/report-style asks ("give me a report on TCS", "analyze TCS's
+    # financials") name no specific ratio but still belong here -- gated by
+    # _INDIAN_INSTRUMENT/_NIFTY_SCOPE same as everything else in this family,
+    # so this never fires for a US-company question.
+    r"\breport\b",
+    r"\banalyz(e|ing|is)\b",
+    r"\boverview\b",
+    r"\bfinancials?\b",
+    r"\bmargins?\b",
+    r"\bgrowth\b",
+    r"\bleverage\b",
+    r"\bdebt\b",
+    # Explicitly-unavailable data points, so the model states the gap itself
+    # (FUNDAMENTALS_SYSTEM_PROMPT's SCOPE section) rather than this falling
+    # through to the SEC narrative path's unrelated "filing does not cover
+    # this" framing.
+    r"52.week",
+    r"\bvolume\b",
+    r"day change",
+    r"dividend yield",
 )
 
 _SCREENING = (
