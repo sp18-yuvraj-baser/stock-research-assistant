@@ -32,5 +32,27 @@ def test_other_error_status_raises_a_plain_upstox_error() -> None:
     client = UpstoxClient(
         token="fake-token", transport=_transport(500, {"error": "boom"})
     )
+    # attempts=1: a 5xx is retried by design, but a unit test shouldn't pay
+    # for the real backoff delay to prove the eventual-failure path works.
     with client as c, pytest.raises(UpstoxError):
-        c.get_json("/v2/market-quote/ltp", params={"instrument_key": "NSE_EQ|FAKE"})
+        c.get_json(
+            "/v2/market-quote/ltp", params={"instrument_key": "NSE_EQ|FAKE"}, attempts=1
+        )
+
+
+def test_transient_5xx_recovers_on_retry() -> None:
+    attempts_made = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        attempts_made["n"] += 1
+        if attempts_made["n"] < 2:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(200, json={"data": {}})
+
+    client = UpstoxClient(token="fake-token", transport=httpx.MockTransport(handler))
+    with client as c:
+        result = c.get_json(
+            "/v2/market-quote/ltp", params={"instrument_key": "NSE_EQ|FAKE"}
+        )
+    assert result == {"data": {}}
+    assert attempts_made["n"] == 2

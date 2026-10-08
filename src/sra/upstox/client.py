@@ -53,19 +53,39 @@ class UpstoxClient:
     def __exit__(self, *_exc: object) -> None:
         self._client.close()
 
-    def get_json(self, path: str, *, params: dict[str, str]) -> Any:
-        self._throttle()
-        response = self._client.get(path, params=params)
-        if response.status_code == 401:
-            raise UpstoxAuthError(
-                "Upstox rejected the access token (expired or revoked). "
-                "Run `sra upstox login` again."
-            )
-        if response.status_code != 200:
-            raise UpstoxError(
-                f"{response.status_code} from {path}: {response.text[:200]}"
-            )
-        return response.json()
+    def get_json(self, path: str, *, params: dict[str, str], attempts: int = 4) -> Any:
+        """GET with retry/backoff, same shape as SecClient._fetch.
+
+        A transient network blip here (fundamentals now auto-refresh inline
+        while answering a live question, not only from a rerunnable manual
+        ingest command) must not crash the question with a raw traceback.
+        """
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            self._throttle()
+            try:
+                response = self._client.get(path, params=params)
+            except httpx.HTTPError as exc:
+                last_error = exc
+            else:
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code == 401:
+                    raise UpstoxAuthError(
+                        "Upstox rejected the access token (expired or revoked). "
+                        "Run `sra upstox login` again."
+                    )
+                # 429 throttles, 5xx sheds load; both recover on retry.
+                if response.status_code in (429, 500, 502, 503, 504):
+                    last_error = UpstoxError(f"{response.status_code} from {path}")
+                else:
+                    raise UpstoxError(
+                        f"{response.status_code} from {path}: {response.text[:200]}"
+                    )
+            time.sleep(2**attempt)
+        raise UpstoxError(
+            f"giving up on {path} after {attempts} attempts"
+        ) from last_error
 
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
