@@ -1,20 +1,13 @@
-"""Ingest P/E, ROE and other ratios plus income-statement/balance-sheet
-history for the tracked Nifty-50 universe, from Upstox's Fundamentals API.
+"""Ingest NSE/BSE fundamental research from Upstox's Fundamentals API."""
 
-One Postgres transaction per ticker, same as ingest/run.py: a failure
-part-way through a 50-company run leaves the rest intact and the run
-re-runnable.
-"""
-
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
-import psycopg
-
-from sra.config import settings
-from sra.ingest.instruments_run import DEFAULT_NSE_TICKERS
-from sra.upstox.client import UpstoxClient
+from sra.db import connect
+from sra.upstox.client import UpstoxAuthError, UpstoxClient, UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
 
 UPSERT_RATIO = """
@@ -30,13 +23,24 @@ SET company_value = EXCLUDED.company_value,
 
 UPSERT_FINANCIAL = """
 INSERT INTO fundamental_financials
-  (instrument_key, statement, time_period, category, period, value, fetched_at)
+  (instrument_key, statement, time_period, category, period, period_end, value,
+   fetched_at)
 VALUES
   (%(instrument_key)s, %(statement)s, %(time_period)s, %(category)s, %(period)s,
-   %(value)s, %(fetched_at)s)
+   %(period_end)s, %(value)s, %(fetched_at)s)
 ON CONFLICT (instrument_key, statement, time_period, category, period) DO UPDATE
-SET value = EXCLUDED.value, fetched_at = EXCLUDED.fetched_at
+SET value = EXCLUDED.value,
+    period_end = EXCLUDED.period_end,
+    fetched_at = EXCLUDED.fetched_at
 """
+
+# --resume skips a listing whose ratios were stored within this window, so a
+# stopped full-universe run continues instead of starting over.
+RESUME_WINDOW_SECONDS = 3600
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")  # fmt: skip
+_PERIOD_LABEL = re.compile(r"^([A-Z][a-z]{2}) ([0-9]{4})$")
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,11 @@ class FundamentalsIngestReport:
     ticker: str
     ratios: int
     financials: int
+    error: str | None = None
+    skipped: bool = False
+
+
+ProgressCallback = Callable[[int, int, FundamentalsIngestReport], None]
 
 
 def _parse_ratio_value(raw: str | None) -> float | None:
@@ -61,72 +70,150 @@ def _parse_ratio_value(raw: str | None) -> float | None:
         return None
 
 
-def _ratio_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _period_end(label: str) -> date | None:
+    """'Mar 2026' -> 2026-03-01 (first of the month, for ordering); else None.
+
+    Matches the migration's backfill. Month names are looked up rather than
+    parsed with strptime, whose %b depends on the process locale.
+    """
+    match = _PERIOD_LABEL.match(label)
+    if match is None or match.group(1) not in _MONTHS:
+        return None
+    return date(int(match.group(2)), _MONTHS.index(match.group(1)) + 1, 1)
+
+
+def _data(payload: Any, expected: type[list[Any]] | type[dict[str, Any]]) -> Any:
+    """The payload's "data" member, or an empty one when it is null/absent.
+
+    Upstox can answer 200 with `"data": null`; `.get("data", {})` would not
+    default that (nor an empty list where an object is expected). A body of
+    the wrong shape is an error for this ticker.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(f"unexpected response body: {type(payload).__name__}")
+    data = payload.get("data")
+    if not data:
+        return expected()
+    if not isinstance(data, expected):
+        raise ValueError(f"unexpected data member: {type(data).__name__}")
+    return data
+
+
+def _ratio_rows(payload: Any) -> list[dict[str, Any]]:
     return [
         {
-            "name": str(entry.get("name")),
+            "name": str(entry["name"]),
             "company_value": _parse_ratio_value(entry.get("company_value")),
             "sector_value": _parse_ratio_value(entry.get("sector_value")),
         }
-        for entry in payload.get("data", [])
+        for entry in _data(payload, list)
+        # An entry with no name would be stored under the literal name 'None'.
+        if isinstance(entry, dict) and entry.get("name")
     ]
 
 
-def _income_statement_rows(
-    payload: dict[str, Any], *, time_period: str
-) -> list[dict[str, Any]]:
+def _financial_row(
+    statement: str, time_period: str, category: str, period: str, value: Any
+) -> dict[str, Any]:
+    return {
+        "statement": statement,
+        "time_period": time_period,
+        "category": category,
+        "period": period,
+        "period_end": _period_end(period),
+        "value": value,
+    }
+
+
+def _income_statement_rows(payload: Any, *, time_period: str) -> list[dict[str, Any]]:
     rows = []
-    for entry in payload.get("data", {}).get("income_statement", []):
-        category = str(entry.get("category"))
-        for point in entry.get("history", []):
-            rows.append(
-                {
-                    "statement": "income_statement",
-                    "time_period": time_period,
-                    "category": category,
-                    "period": str(point.get("period")),
-                    "value": point.get("value"),
-                }
-            )
+    for entry in _data(payload, dict).get("income_statement") or []:
+        if not isinstance(entry, dict) or not entry.get("category"):
+            continue
+        category = str(entry["category"])
+        for point in entry.get("history") or []:
+            if isinstance(point, dict) and point.get("period"):
+                rows.append(
+                    _financial_row(
+                        "income_statement",
+                        time_period,
+                        category,
+                        str(point["period"]),
+                        point.get("value"),
+                    )
+                )
     return rows
 
 
-def _balance_sheet_rows(
-    payload: dict[str, Any], *, time_period: str
-) -> list[dict[str, Any]]:
+def _balance_sheet_rows(payload: Any, *, time_period: str) -> list[dict[str, Any]]:
     # Unlike income-statement, Upstox returns balance-sheet history as one
     # flat list of {period, total_asset, total_liability} rather than a list
     # keyed by category -- pivot it into the same (category, period, value)
     # shape so both statements share one table.
     rows = []
-    for point in payload.get("data", {}).get("history", []):
-        period = str(point.get("period"))
+    for point in _data(payload, dict).get("history") or []:
+        if not isinstance(point, dict) or not point.get("period"):
+            continue
+        period = str(point["period"])
         for category in ("total_asset", "total_liability"):
             if point.get(category) is not None:
                 rows.append(
-                    {
-                        "statement": "balance_sheet",
-                        "time_period": time_period,
-                        "category": category,
-                        "period": period,
-                        "value": point.get(category),
-                    }
+                    _financial_row(
+                        "balance_sheet",
+                        time_period,
+                        category,
+                        period,
+                        point[category],
+                    )
                 )
     return rows
 
 
 def ingest_fundamentals(
     tickers: list[str] | None = None,
+    *,
+    all_equities: bool = False,
+    resume: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> list[FundamentalsIngestReport]:
     """Fetch key ratios and income-statement/balance-sheet history for each
-    tracked ticker and upsert them. Safe to re-run."""
-    requested = list(tickers) if tickers else list(DEFAULT_NSE_TICKERS)
-    with psycopg.connect(settings().readonly_dsn) as lookup_conn:
+    requested ticker and upsert them. Safe to re-run.
+
+    Full-universe refreshes are opt-in because Upstox is queried separately
+    for every company and a complete NSE/BSE run can take substantial time.
+    With ``resume=True``, a listing with a recently stored ratios response is
+    skipped. Each completed listing is committed independently, so a stopped
+    full-universe job can continue without redoing its completed work.
+
+    A failure on one ticker (bad payload, Upstox error in ``--all`` mode) is
+    recorded on its report. An expired token (``UpstoxAuthError``) is not:
+    every remaining ticker would fail the same way, so the run aborts.
+    """
+    if tickers and all_equities:
+        raise ValueError("choose explicit tickers or all_equities, not both")
+    with connect(readonly=True) as lookup_conn:
+        if all_equities:
+            ticker_rows = lookup_conn.execute(
+                "SELECT DISTINCT ticker FROM instruments ORDER BY ticker"
+            ).fetchall()
+            requested = [str(row["ticker"]) for row in ticker_rows]
+            if not requested:
+                raise UnknownInstrumentError(
+                    "no NSE/BSE instruments are stored; run "
+                    "`sra upstox ingest-instruments --all` first"
+                )
+        else:
+            requested = list(tickers or [])
+            if not requested:
+                raise ValueError("provide one or more symbols, or use `--all`")
         rows = lookup_conn.execute(
-            "SELECT ticker, instrument_key FROM instruments WHERE ticker = ANY(%s)",
+            """SELECT DISTINCT ON (ticker) ticker, instrument_key
+               FROM instruments WHERE ticker = ANY(%s)
+               ORDER BY ticker,
+                 CASE exchange WHEN 'NSE_EQ' THEN 0 WHEN 'BSE_EQ' THEN 1 ELSE 2 END""",
             (requested,),
         ).fetchall()
-    resolved = {str(ticker): str(instrument_key) for ticker, instrument_key in rows}
+    resolved = {str(row["ticker"]): str(row["instrument_key"]) for row in rows}
     missing = [t for t in requested if t not in resolved]
     if missing:
         raise UnknownInstrumentError(
@@ -134,39 +221,79 @@ def ingest_fundamentals(
             f"(run `sra upstox ingest-instruments` first): {', '.join(missing)}"
         )
 
-    reports = []
+    recently_completed: set[str] = set()
+    if resume:
+        cutoff = datetime.now(UTC).timestamp() - RESUME_WINDOW_SECONDS
+        with connect(readonly=True) as lookup_conn:
+            recent_rows = lookup_conn.execute(
+                """SELECT DISTINCT i.ticker
+                   FROM fundamental_ratios fr
+                   JOIN instruments i ON i.instrument_key = fr.instrument_key
+                   WHERE fr.fetched_at >= to_timestamp(%s)""",
+                (cutoff,),
+            ).fetchall()
+        recently_completed = {str(row["ticker"]) for row in recent_rows}
+
+    reports: list[FundamentalsIngestReport] = []
+    total = len(requested)
+
+    def record(position: int, report: FundamentalsIngestReport) -> None:
+        reports.append(report)
+        if on_progress:
+            on_progress(position, total, report)
+
     with UpstoxClient() as client:
-        for ticker in requested:
+        for position, ticker in enumerate(requested, start=1):
+            if ticker in recently_completed:
+                record(position, FundamentalsIngestReport(ticker, 0, 0, skipped=True))
+                continue
             instrument_key = resolved[ticker]
             isin = instrument_key.split("|", 1)[1]
             fetched_at = datetime.now(UTC)
+            try:
+                ratio_rows = _ratio_rows(
+                    client.get_json(f"/v2/fundamentals/{isin}/key-ratios", params={})
+                )
+                financial_rows = _income_statement_rows(
+                    client.get_json(
+                        f"/v2/fundamentals/{isin}/income-statement",
+                        params={"type": "consolidated", "time_period": "yearly"},
+                    ),
+                    time_period="yearly",
+                )
+                financial_rows += _income_statement_rows(
+                    client.get_json(
+                        f"/v2/fundamentals/{isin}/income-statement",
+                        params={"type": "consolidated", "time_period": "quarterly"},
+                    ),
+                    time_period="quarterly",
+                )
+                financial_rows += _balance_sheet_rows(
+                    client.get_json(
+                        f"/v2/fundamentals/{isin}/balance-sheet",
+                        params={"type": "consolidated"},
+                    ),
+                    time_period="yearly",
+                )
+            except UpstoxAuthError:
+                raise
+            except UpstoxError as exc:
+                if not all_equities:
+                    raise
+                record(position, FundamentalsIngestReport(ticker, 0, 0, error=str(exc)))
+                continue
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                # A non-JSON body (JSONDecodeError is a ValueError) or an
+                # unexpected payload shape: this listing failed, not the run.
+                record(
+                    position,
+                    FundamentalsIngestReport(
+                        ticker, 0, 0, error=f"bad response: {exc}"
+                    ),
+                )
+                continue
 
-            ratio_rows = _ratio_rows(
-                client.get_json(f"/v2/fundamentals/{isin}/key-ratios", params={})
-            )
-            financial_rows = _income_statement_rows(
-                client.get_json(
-                    f"/v2/fundamentals/{isin}/income-statement",
-                    params={"type": "consolidated", "time_period": "yearly"},
-                ),
-                time_period="yearly",
-            )
-            financial_rows += _income_statement_rows(
-                client.get_json(
-                    f"/v2/fundamentals/{isin}/income-statement",
-                    params={"type": "consolidated", "time_period": "quarterly"},
-                ),
-                time_period="quarterly",
-            )
-            financial_rows += _balance_sheet_rows(
-                client.get_json(
-                    f"/v2/fundamentals/{isin}/balance-sheet",
-                    params={"type": "consolidated"},
-                ),
-                time_period="yearly",
-            )
-
-            with psycopg.connect(settings().dsn) as conn:
+            with connect() as conn:
                 for row in ratio_rows:
                     conn.execute(
                         UPSERT_RATIO,
@@ -186,33 +313,8 @@ def ingest_fundamentals(
                         },
                     )
                 conn.commit()
-            reports.append(
-                FundamentalsIngestReport(ticker, len(ratio_rows), len(financial_rows))
+            record(
+                position,
+                FundamentalsIngestReport(ticker, len(ratio_rows), len(financial_rows)),
             )
     return reports
-
-
-def _is_stale(oldest_fetched_at: datetime | None, *, ttl_seconds: int) -> bool:
-    """No data at all, or the oldest tracked row is past its TTL."""
-    if oldest_fetched_at is None:
-        return True
-    return (datetime.now(UTC) - oldest_fetched_at).total_seconds() > ttl_seconds
-
-
-def ensure_fresh_fundamentals(tickers: list[str] | None = None) -> bool:
-    """Refresh fundamentals from Upstox if the oldest tracked row is stale.
-
-    Called automatically before answering a fundamentals question (see
-    agent/loop.py's fundamentals_path), rather than requiring a separate
-    manual `sra upstox ingest-fundamentals` run: a question always gets data
-    no older than SRA_UPSTOX_FUNDAMENTALS_TTL_SECONDS, fetched live when
-    needed and otherwise read from Postgres at no API cost. Returns whether a
-    refresh actually ran.
-    """
-    with psycopg.connect(settings().readonly_dsn) as conn:
-        row = conn.execute("SELECT min(fetched_at) FROM fundamental_ratios").fetchone()
-    oldest = row[0] if row is not None else None
-    if not _is_stale(oldest, ttl_seconds=settings().upstox_fundamentals_ttl_seconds):
-        return False
-    ingest_fundamentals(tickers)
-    return True

@@ -1,6 +1,18 @@
+import gzip
+import json
+from pathlib import Path
+from typing import Any
+
+import httpx
 import pytest
 
-from sra.upstox.instruments import UnknownInstrumentError, resolve_instruments
+from sra.upstox.client import UpstoxError
+from sra.upstox.instruments import (
+    UnknownInstrumentError,
+    fetch_instrument_master,
+    list_indian_equities,
+    resolve_instruments,
+)
 
 _FIXTURE_RECORDS = [
     {
@@ -55,3 +67,106 @@ def test_unknown_ticker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     with pytest.raises(UnknownInstrumentError, match="RELIANCE"):
         resolve_instruments(["TCS", "RELIANCE"])
+
+
+def test_resolve_bse_equity_series(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sra.upstox.instruments.fetch_instrument_master",
+        lambda **_kwargs: _FIXTURE_RECORDS,
+    )
+    assert resolve_instruments(["TCS"], segment="BSE_EQ")["TCS"] == (
+        "BSE_EQ|INE467B01029",
+        "BSE_EQ",
+    )
+
+
+def test_list_indian_equities_keeps_nse_and_bse_cash_equities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sra.upstox.instruments.fetch_instrument_master",
+        lambda **_kwargs: _FIXTURE_RECORDS,
+    )
+
+    equities = list_indian_equities()
+
+    assert [(item.ticker, item.exchange) for item in equities] == [
+        ("TCS", "BSE_EQ"),
+        ("INFY", "NSE_EQ"),
+        ("TCS", "NSE_EQ"),
+    ]
+
+
+def _gz(records: list[dict[str, Any]]) -> bytes:
+    return gzip.compress(json.dumps(records).encode())
+
+
+def _serve(monkeypatch: pytest.MonkeyPatch, body: bytes, status: int = 200) -> None:
+    monkeypatch.setattr(
+        "sra.upstox.instruments.httpx.get",
+        lambda url, **_k: httpx.Response(
+            status, content=body, request=httpx.Request("GET", url)
+        ),
+    )
+
+
+def test_download_is_cached_and_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, _gz(_FIXTURE_RECORDS))
+    records = fetch_instrument_master(cache_dir=tmp_path / "cache")
+    assert records == _FIXTURE_RECORDS
+    cached = tmp_path / "cache" / "upstox_instruments.json.gz"
+    assert json.loads(gzip.decompress(cached.read_bytes())) == _FIXTURE_RECORDS
+    assert [p.name for p in cached.parent.iterdir()] == [cached.name]
+
+
+def test_truncated_download_does_not_replace_a_good_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    good = _gz(_FIXTURE_RECORDS)
+    cached = tmp_path / "upstox_instruments.json.gz"
+    cached.write_bytes(good)
+    _serve(monkeypatch, good[: len(good) // 2])
+    with pytest.raises(UpstoxError, match="not valid"):
+        fetch_instrument_master(cache_dir=tmp_path, refresh=True)
+    assert cached.read_bytes() == good
+    assert [p.name for p in tmp_path.iterdir()] == [cached.name]
+
+
+def test_failed_cache_write_leaves_the_old_file_and_no_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cached = tmp_path / "upstox_instruments.json.gz"
+    cached.write_bytes(b"previous")
+    _serve(monkeypatch, _gz(_FIXTURE_RECORDS))
+
+    def _fail(*_a: object, **_k: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("sra.upstox.instruments.os.replace", _fail)
+    with pytest.raises(OSError, match="disk full"):
+        fetch_instrument_master(cache_dir=tmp_path, refresh=True)
+    assert cached.read_bytes() == b"previous"
+    assert [p.name for p in tmp_path.iterdir()] == [cached.name]
+
+
+def test_http_failure_is_an_upstox_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _serve(monkeypatch, b"", status=503)
+    with pytest.raises(UpstoxError, match="could not download"):
+        fetch_instrument_master(cache_dir=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fresh_cache_is_reused_without_a_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "upstox_instruments.json.gz").write_bytes(_gz(_FIXTURE_RECORDS))
+
+    def _no_network(*_a: object, **_k: object) -> None:
+        raise AssertionError("must not download")
+
+    monkeypatch.setattr("sra.upstox.instruments.httpx.get", _no_network)
+    assert fetch_instrument_master(cache_dir=tmp_path) == _FIXTURE_RECORDS

@@ -1,116 +1,93 @@
-from sra.agent.compose import (
-    ADVICE_REFUSAL,
-    ADVICE_REFUSAL_INDIAN,
-    FIGURES_HEADING,
-    NARRATIVE_HEADING,
-    ask,
-    compose_hybrid,
-)
+from collections.abc import Callable
+
+import pytest
+
+from sra.agent import compose, holding
+from sra.agent.compose import OUT_OF_SCOPE, ask
+from sra.agent.holding import Company, Resolution
 from sra.agent.loop import PathResult
-from sra.tools.run_sql import SqlResult
-from sra.tools.search_filings import Passage, SearchResult
+from sra.agent.router import Route
 
 
-def _numeric(accession: str = "0001045810-26-000075") -> PathResult:
-    return PathResult(
-        text="Gross margin was 74.98%.",
-        sql_calls=[
-            SqlResult(
-                sql="SELECT ...",
-                columns=["accession_no", "fiscal_year", "fiscal_period", "period_end"],
-                rows=[
-                    {
-                        "accession_no": accession,
-                        "fiscal_year": 2027,
-                        "fiscal_period": "Q2",
-                        "period_end": "2026-07-26",
-                    }
-                ],
-            )
-        ],
-    )
+def test_holding_question_gets_the_code_rendered_review(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def fake_review(question: str) -> PathResult:
+        seen.append(question)
+        return PathResult(text="HDFC BANK LTD (HDFCBANK): holding review")
+
+    monkeypatch.setattr(holding, "review", fake_review)
+    question = "I have 100 hdfc bank stocks, should I keep or sell them?"
+    answer = ask(question)
+    assert seen == [question]
+    assert answer.path is not None
+    assert answer.text == "HDFC BANK LTD (HDFCBANK): holding review"
 
 
-def _narrative(accession: str = "0001045810-26-000075") -> PathResult:
-    return PathResult(
-        text='Margin rose "due to improved mix from Blackwell Ultra".',
-        search_calls=[
-            SearchResult(
-                query="gross margin",
-                passages=[
-                    Passage(
-                        ticker="NVDA",
-                        form_type="10-Q",
-                        period_of_report="2026-07-26",
-                        accession_no=accession,
-                        section="Part I Item 2 Management's Discussion and Analysis",
-                        ordinal=3,
-                        text="Gross margin increased due to improved mix.",
-                        similarity=0.81,
-                    )
-                ],
-            )
-        ],
-    )
+def test_foreign_market_question_is_out_of_scope_without_a_model_call() -> None:
+    answer = ask("What is Apple's P/E ratio?")
+    assert answer.text == OUT_OF_SCOPE
+    assert answer.paths == []
 
 
-def test_both_sources_appear_under_separate_headings() -> None:
-    composed = compose_hybrid(_numeric(), _narrative())
-    assert FIGURES_HEADING in composed
-    assert NARRATIVE_HEADING in composed
-    # The figure must sit above the narrative heading, never inside it.
-    assert composed.index("74.98%") < composed.index(NARRATIVE_HEADING)
-    assert composed.index("Blackwell Ultra") > composed.index(NARRATIVE_HEADING)
+def _recording_path(ran: list[str], route: Route) -> Callable[..., PathResult]:
+    def path(question: str, **_: object) -> PathResult:
+        ran.append(route.value)
+        return PathResult(text=route.value)
+
+    return path
 
 
-def test_each_block_carries_its_own_sources() -> None:
-    composed = compose_hybrid(
-        _numeric("0000000001-01-000001"), _narrative("0000000002-02-000002")
-    )
-    figures, narrative = composed.split(NARRATIVE_HEADING)
-    assert "0000000001-01-000001" in figures
-    assert "0000000001-01-000001" not in narrative
-    assert "0000000002-02-000002" in narrative
+def _stub_paths(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    ran: list[str] = []
+    for route in (Route.REALTIME, Route.FUNDAMENTALS, Route.GENERAL_FINANCE):
+        monkeypatch.setitem(
+            compose._MODEL_PATHS,
+            route,
+            _recording_path(ran, route),
+        )
+    return ran
 
 
-def test_mismatched_periods_are_flagged() -> None:
-    # Both halves can be individually correct while the composition misleads.
-    composed = compose_hybrid(
-        _numeric("0000000001-01-000001"), _narrative("0000000002-02-000002")
-    )
-    assert "may describe a different period" in composed
+def _resolves(monkeypatch: pytest.MonkeyPatch, *companies: Company) -> list[str]:
+    looked_up: list[str] = []
+
+    def fake(question: str) -> Resolution:
+        looked_up.append(question)
+        return Resolution(list(companies), [])
+
+    monkeypatch.setattr(holding, "resolve_companies", fake)
+    return looked_up
 
 
-def test_shared_filing_is_not_flagged() -> None:
-    composed = compose_hybrid(_numeric(), _narrative())
-    assert "may describe a different period" not in composed
+def test_company_named_in_plain_words_gets_the_fundamentals_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran = _stub_paths(monkeypatch)
+    _resolves(monkeypatch, Company("INFY", "INFOSYS LTD"))
+    answer = ask("what is the pe of infosys")
+    assert answer.route is Route.FUNDAMENTALS
+    assert ran == ["fundamentals"]
 
 
-def test_empty_numeric_path_says_so_rather_than_going_quiet() -> None:
-    composed = compose_hybrid(PathResult(), _narrative())
-    assert "No figures for this were found" in composed
-    assert NARRATIVE_HEADING in composed
+def test_education_question_stays_general_and_costs_one_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran = _stub_paths(monkeypatch)
+    looked_up = _resolves(monkeypatch)
+    assert ask("what is a P/E ratio").route is Route.GENERAL_FINANCE
+    assert ran == ["general_finance"]
+    assert len(looked_up) == 1
 
 
-def test_empty_narrative_path_says_so() -> None:
-    composed = compose_hybrid(_numeric(), PathResult())
-    assert "do not appear to explain this" in composed
-
-
-def test_advice_refusal_offers_an_alternative() -> None:
-    assert "not investment advice" in ADVICE_REFUSAL
-    assert "What it can do instead" in ADVICE_REFUSAL
-
-
-def test_advice_about_a_sec_filer_gets_the_filings_refusal() -> None:
-    answer = ask("Is Nvidia a good investment right now?")
-    assert answer.text == ADVICE_REFUSAL
-
-
-def test_advice_about_a_tracked_nse_ticker_gets_the_indian_refusal() -> None:
-    answer = ask("Is TCS a good buy right now?")
-    assert answer.text == ADVICE_REFUSAL_INDIAN
-    assert "live last-traded price" in answer.text
-    assert "fundamentals" in answer.text
-    # The SEC-filing offers don't apply to an Indian equity with no filings.
-    assert "XBRL" not in answer.text
+def test_no_lookup_when_the_regexes_already_route_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran = _stub_paths(monkeypatch)
+    looked_up = _resolves(monkeypatch, Company("TCS", "TCS LTD"))
+    assert ask("What is HDFC Bank's P/E ratio?").route is Route.FUNDAMENTALS
+    assert ask("TCS share price").route is Route.REALTIME
+    assert looked_up == []
+    assert ran == ["fundamentals", "realtime"]

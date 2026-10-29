@@ -47,3 +47,43 @@ def test_rejects_unsafe_query(sql: str) -> None:
 
 def test_strips_trailing_semicolon() -> None:
     assert assert_single_read_query("SELECT 1;") == "SELECT 1"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A ';' or quote inside a dollar-quoted string is data, not syntax.
+        "SELECT $$a;b$$ AS s",
+        "SELECT $$it's; fine$$",
+        "SELECT $tag$ x ; $$ y $tag$ AS s",
+        "SELECT $q$ one ' two $q$, 'a;b'",
+        # $1 is a parameter, not a dollar quote; a $ inside an identifier is too.
+        "SELECT $1",
+        "SELECT a$b$c FROM t",
+        # A backslash-escaped quote inside an E'' string does not end it.
+        r"SELECT E'it\'s; fine'",
+    ],
+)
+def test_accepts_dollar_and_escape_strings_hiding_semicolons(sql: str) -> None:
+    assert assert_single_read_query(sql)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # A lone quote inside $$..$$ used to make the masker open a literal and
+        # blank the real ';' after it.
+        "SELECT $$'$$; SELECT pg_sleep(30); SELECT '",
+        "SELECT $x$'$x$ ; SELECT 2 ; SELECT 'a'",
+        # A dollar-quoted string that is closed early still leaves a real ';'.
+        "SELECT $$a$$; DROP TABLE facts",
+        # E'' strings: \' does not close the literal, '' afterwards does.
+        r"SELECT E'\'' ; SELECT 2 ; SELECT 'a'",
+        # Unterminated dollar quote: everything after it is masked, and the
+        # leading statement still ends in a visible ';'.
+        "SELECT 1; SELECT $$",
+    ],
+)
+def test_rejects_multi_statement_hidden_by_quote_confusion(sql: str) -> None:
+    with pytest.raises(UnsafeSqlError):
+        assert_single_read_query(sql)

@@ -1,0 +1,606 @@
+"""Answer buy/sell/hold questions with a holding review rendered in code.
+
+A live run of the model-driven version showed why this is code: the local
+model multiplied share counts in its head, wrote SQL that failed on the
+NSE/BSE duplicate rows, called a P/E above its sector "below", and ran out of
+output tokens before the disclaimer. Here every figure comes from a query or
+the live quote, every comparison and multiplication is done in Python, and the
+"not advice" line cannot be dropped. The review never says keep or sell; it
+lays out the evidence on both sides and the questions only the user can
+answer.
+"""
+
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
+
+from sra.agent.loop import PathResult
+from sra.tools.get_live_quote import LiveQuote, get_live_quote
+from sra.tools.run_sql import SqlResult, run_sql
+
+DISCLAIMER = (
+    "This is research, not investment advice. For a personal recommendation, "
+    "consult a SEBI-registered investment adviser."
+)
+
+NO_COMPANY = f"""\
+I couldn't find an NSE company in that question. I can't pick stocks or tell
+you to buy, sell or hold, but I can review one.
+Name the NSE/BSE company, e.g. "I have 100 HDFCBANK shares bought at 1500,
+should I keep them?", and I'll show its live price, your position value,
+valuation against its sector and its profit trend.
+
+{DISCLAIMER}"""
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Words that occur in holding questions but never start or end a company
+# name in them. Without this, "time" resolves to TIME TECHNOPLAST and "idea"
+# to VODAFONE IDEA.
+_STOPWORDS = frozenset(
+    """
+    i me my we our you your it its is am are was be been have has had do
+    does did should shall can could would will must may a an the and or but
+    if of to in on at for with from by about into as than then so this that
+    these those them they their there here what which who how when why where
+    any some all keep hold holding holdings sell buy exit add book booking
+    profit profits loss losses average accumulate continue stay avoid invest
+    investment investing own owned bought buying selling purchase share
+    shares stock stocks equity position portfolio advice suggest suggestion
+    suggestions thoughts review now today right good bad wise safe better
+    time long term short price target market value worth go up down rise
+    fall get out year years month months rs inr crore lakh quantity qty plan
+    lot more less trim ok okay please tell think idea view also just still
+    yet already nse bse kya mujhe mere paas hai ka ki ke ya karu karun karna
+    kar du dun chahiye rakhu rakhna bechu bechna nikal lena sahi abhi mein
+    """.split()  # noqa: SIM905 -- a word list reads better as prose
+)
+
+# Longest company name, in words, worth matching ("state bank of india").
+_MAX_NGRAM = 4
+
+# Everyday names that are neither the NSE symbol nor the start of the listed
+# name ("SBI" is SBIN, "L&T" is LARSEN & TOUBRO, Zomato is now ETERNAL).
+_ALIASES = {
+    "sbi": "SBIN",
+    "l&t": "LT",
+    "lnt": "LT",
+    "zomato": "ETERNAL",
+    "hul": "HINDUNILVR",
+    "airtel": "BHARTIARTL",
+    "kotak bank": "KOTAKBANK",
+    "ril": "RELIANCE",
+}
+
+# Digit runs are bounded so a pathological message cannot make matching slow.
+_NUMBER = r"(\d[\d,]{0,15}(?:\.\d{1,4})?)"
+_CURRENCY = r"(?:rs\.?|inr|₹)?\s*"
+_QUANTITY = (
+    # "100 shares", "100 hdfc bank stocks"; never "50000 worth of ... shares".
+    re.compile(
+        r"(\d[\d,]{0,15})\s+(?:(?!worth\b|rupees\b|in\b)[a-z&.'-]+\s+){0,4}?"
+        r"(?:shares?|stocks?|qty)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:bought|own|hold|holding|have)\s+(\d[\d,]{0,15})", re.I),
+    re.compile(r"\b(?:qty|quantity)\s*(?:of|is|:)?\s*(\d[\d,]{0,15})", re.I),
+)
+_BUY_PRICE = (
+    re.compile(
+        r"(?:\bbought\b[^.?!]{0,60}?\bat\b|\b(?:avg\.?|average)(?: (?:buy )?price"
+        r"| cost)?|\bbuy(?:ing)? price|\bcost(?: price)?|\bpaid|@)\s*"
+        rf"(?:of|is|was|:)?\s*{_CURRENCY}{_NUMBER}",
+        re.I,
+    ),
+    re.compile(
+        rf"\bshares?\b[^.?!]{{0,40}}?(?<!trading )\bat\s*{_CURRENCY}{_NUMBER}", re.I
+    ),
+    re.compile(rf"{_NUMBER}\s*(?:avg|average|cost)\b", re.I),
+)
+# A number that is money or a portfolio count, not this stock's share count:
+# "2.5 lakh", "Rs 50,000", "50000 invested in TCS", "30 stocks in my portfolio".
+_NOT_SHARES_AFTER = re.compile(
+    r"\s*(?:\.\d|lakhs?\b|lacs?\b|crores?\b|cr\b|k\b|%|rupees\b|rs\b|inr\b|worth\b"
+    r"|invested\b|in\b|into\b|of\b"
+    r"|(?:\w+\s+){0,2}?(?:in|across) (?:my|the|your|our) portfolio)",
+    re.I,
+)
+_NOT_SHARES_BEFORE = re.compile(r"(?:rs\.?|inr|₹)\s*$", re.I)
+_NOT_PRICE_AFTER = re.compile(r"\s*(?:lakhs?\b|lacs?\b|crores?\b|cr\b|k\b|%)", re.I)
+
+# For these a lower figure than the sector is the better one.
+_LOWER_IS_BETTER = frozenset({"P/E", "P/B", "EV/EBITDA", "Net NPA"})
+_VALUATION = frozenset({"P/E", "P/B", "EV/EBITDA"})
+_PERCENT = frozenset({"ROE", "ROA", "ROCE", "NIM", "Net NPA", "CASA"})
+_RATIO_ORDER = (
+    "P/E", "P/B", "EV/EBITDA", "ROE", "ROCE", "ROA",
+    "NIM", "Net NPA", "CASA", "Quick Ratio",
+)  # fmt: skip
+
+# A sector benchmark more than this many times off the company's own figure
+# is a data problem, not a comparison (HDFCBANK P/E 13.01 vs "sector" 0.32).
+_IMPLAUSIBLE_GAP = Decimal(10)
+# Year-on-year moves beyond this usually mean a merger, demerger or one-off.
+_STEP_CHANGE_PCT = Decimal(50)
+_TREND_PERIODS = 3
+
+
+@dataclass(frozen=True)
+class Position:
+    quantity: Decimal | None = None
+    buy_price: Decimal | None = None
+    # Several different share counts or prices: which belongs to which
+    # company cannot be told, so neither is used.
+    conflicting: bool = False
+
+
+@dataclass(frozen=True)
+class Company:
+    ticker: str
+    name: str
+
+
+def _number(value: object) -> Decimal | None:
+    """A finite Decimal, or None for NULL, NaN or anything unparseable."""
+    if value is None:
+        return None
+    try:
+        number = Decimal(str(value).replace(",", ""))
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _numbers(
+    patterns: tuple[re.Pattern[str], ...],
+    question: str,
+    *,
+    rejects_after: re.Pattern[str],
+    rejects_before: re.Pattern[str] | None = None,
+) -> set[Decimal]:
+    found: set[Decimal] = set()
+    for pattern in patterns:
+        for match in pattern.finditer(question):
+            if rejects_after.match(question, match.end(1)):
+                continue
+            if rejects_before and rejects_before.search(question[: match.start(1)]):
+                continue
+            value = _number(match.group(1))
+            if value is not None and value > 0:
+                found.add(value)
+    return found
+
+
+def parse_position(question: str) -> Position:
+    """Share count and buy price as the user stated them, if they did."""
+    quantities = _numbers(
+        _QUANTITY,
+        question,
+        rejects_after=_NOT_SHARES_AFTER,
+        rejects_before=_NOT_SHARES_BEFORE,
+    )
+    prices = _numbers(_BUY_PRICE, question, rejects_after=_NOT_PRICE_AFTER)
+    if len(quantities) > 1 or len(prices) > 1:
+        return Position(conflicting=True)
+    return Position(
+        quantity=next(iter(quantities), None), buy_price=next(iter(prices), None)
+    )
+
+
+def _candidate_phrases(question: str) -> list[tuple[range, str]]:
+    """Word n-grams that could name a company, longest first, with positions."""
+    words = re.findall(r"[a-z0-9&]+", question.lower())
+    phrases: list[tuple[range, str]] = []
+    for size in range(min(_MAX_NGRAM, len(words)), 0, -1):
+        for start in range(len(words) - size + 1):
+            gram = words[start : start + size]
+            if gram[0] in _STOPWORDS or gram[-1] in _STOPWORDS:
+                continue
+            if gram[0].isdigit():
+                continue
+            phrases.append((range(start, start + size), " ".join(gram)))
+    return phrases
+
+
+@dataclass(frozen=True)
+class Resolution:
+    companies: list[Company]
+    # Several listed names start with the phrase and none was named exactly.
+    ambiguous: list[Company]
+    error: str | None = None
+    # Matches set aside because a stronger one was found; named in the
+    # answer so a second company is never dropped silently.
+    set_aside: list[Company] = field(default_factory=list)
+    # The companies came from confident matches, not a lone lowercase word.
+    confident: bool = False
+
+
+def resolve_companies(question: str) -> Resolution:
+    """Find every NSE company a question names.
+
+    Longer phrases win and claim their words, so "hdfc bank" is one company,
+    not HDFC Bank plus whatever "bank" alone would match.
+    """
+    phrases = _candidate_phrases(question)
+    if not phrases:
+        return Resolution([], [])
+    keys = {phrase: _ALIASES.get(phrase, phrase.replace(" ", "").upper())
+            for _, phrase in phrases}  # fmt: skip
+    result = run_sql(
+        "SELECT ticker, name FROM instruments WHERE exchange = 'NSE_EQ' AND "
+        "(ticker = ANY(%(tickers)s) OR upper(name) = ANY(%(names)s) "
+        "OR upper(name) LIKE ANY(%(prefixes)s))",
+        {
+            "tickers": sorted(set(keys.values())),
+            "names": [p.upper() for _, p in phrases],
+            "prefixes": [f"{p.upper()} %" for _, p in phrases],
+        },
+    )
+    if result.error:
+        return Resolution([], [], error=result.error)
+    rows = [Company(str(r["ticker"]), str(r["name"])) for r in result.rows]
+    # A single lowercase word is weak: "global" is a ticker and "action" starts
+    # a listed name, but in "the global slowdown" or "the RBI action" neither
+    # names a company. It counts only when nothing stronger matched.
+    strong: list[Company] = []
+    weak: list[Company] = []
+    ambiguous: list[Company] = []
+    claimed: set[int] = set()
+    for words, phrase in phrases:
+        if claimed.intersection(words):
+            continue
+        upper = phrase.upper()
+        exact = [c for c in rows if c.ticker == keys[phrase] or c.name == upper]
+        named = exact or [c for c in rows if c.name.startswith(f"{upper} ")]
+        if len(named) == 1:
+            found = strong if _confident(question, phrase, words) else weak
+            if named[0] not in found:
+                found.append(named[0])
+            claimed.update(words)
+        elif named:
+            ambiguous = ambiguous or sorted(named, key=lambda c: c.ticker)[:5]
+            claimed.update(words)
+    if strong:
+        others = [c for c in weak + ambiguous if c not in strong]
+        return Resolution(strong, [], set_aside=others, confident=True)
+    if weak:
+        return Resolution(weak, [], set_aside=[c for c in ambiguous if c not in weak])
+    return Resolution([], ambiguous)
+
+
+def _confident(question: str, phrase: str, words: range) -> bool:
+    """Whether a matched phrase surely names a company rather than a word.
+
+    True for several words ("hdfc bank"), a known alias ("sbi"), a symbol typed
+    in capitals ("TCS"), or a word used like a holding ("my infosys shares",
+    "the pe of infosys").
+    """
+    if len(words) > 1 or phrase in _ALIASES:
+        return True
+    if re.search(rf"\b{re.escape(phrase.upper())}\b", question):
+        return True
+    lower = question.lower()
+    word = re.escape(phrase)
+    return bool(
+        re.search(rf"\b(my|of|in|sell|buy|hold|keep)\s+{word}\b", lower)
+        or re.search(rf"\b{word}\s+(shares?|stocks?|ltd|limited)\b", lower)
+    )
+
+
+def _money(value: Decimal | float) -> str:
+    return f"₹{Decimal(str(value)):,.2f}"
+
+
+def _figure(name: str, value: Decimal) -> str:
+    return f"{value.normalize():f}{'%' if name in _PERCENT else ''}"
+
+
+def _ist(stamp: object) -> str:
+    moment = (
+        stamp if isinstance(stamp, datetime) else datetime.fromisoformat(str(stamp))
+    )
+    return moment.astimezone(IST).strftime("%d %b %Y, %H:%M IST")
+
+
+@dataclass(frozen=True)
+class _Ratio:
+    name: str
+    company: Decimal
+    sector: Decimal | None
+
+    @property
+    def meaningless(self) -> bool:
+        """A negative or zero multiple says losses, not cheapness."""
+        return self.name in _VALUATION and self.company <= 0
+
+    @property
+    def standing(self) -> int | None:
+        """+1 better than sector, -1 worse, 0 in line, None not comparable."""
+        if self.meaningless or self.sector is None:
+            return None
+        # A sector average at or below zero (IT "ROA -2.04") is bad data;
+        # only Net NPA can genuinely be zero.
+        if self.sector <= 0 and self.name != "Net NPA":
+            return None
+        if self.company > 0 and self.sector > 0:
+            high, low = max(self.company, self.sector), min(self.company, self.sector)
+            if high / low > _IMPLAUSIBLE_GAP:
+                return None
+        if self.company == self.sector:
+            return 0
+        better = (
+            self.company < self.sector
+            if self.name in _LOWER_IS_BETTER
+            else self.company > self.sector
+        )
+        return 1 if better else -1
+
+
+def _ratios(result: SqlResult) -> list[_Ratio]:
+    ratios = []
+    for row in result.rows:
+        company = _number(row["company_value"])
+        if company is not None:
+            ratios.append(
+                _Ratio(str(row["name"]), company, _number(row["sector_value"]))
+            )
+    order = {name: index for index, name in enumerate(_RATIO_ORDER)}
+    return sorted(ratios, key=lambda r: order.get(r.name, len(order)))
+
+
+def _describe_ratio(ratio: _Ratio) -> str:
+    own = f"{ratio.name} {_figure(ratio.name, ratio.company)}"
+    if ratio.meaningless:
+        return f"{own}: not meaningful, usually a sign of losses or negative net worth"
+    if ratio.sector is None:
+        return f"{own} (no sector figure)"
+    versus = f"{own} vs sector {_figure(ratio.name, ratio.sector)}"
+    standing = ratio.standing
+    if standing is None:
+        return f"{versus} (sector figure looks unreliable)"
+    if standing == 0:
+        return f"{versus}: in line with sector"
+    if ratio.name in _VALUATION:
+        return f"{versus}: {'cheaper' if standing > 0 else 'pricier'} than sector"
+    note = " (lower is better)" if ratio.name in _LOWER_IS_BETTER else ""
+    return f"{versus}: {'better' if standing > 0 else 'weaker'} than sector{note}"
+
+
+def _period_key(period: str) -> datetime:
+    return datetime.strptime(period, "%b %Y")
+
+
+def _pct(prior: Decimal, current: Decimal) -> Decimal:
+    return (100 * (current - prior) / prior).quantize(Decimal("0.01"))
+
+
+@dataclass(frozen=True)
+class _Series:
+    label: str
+    points: list[tuple[str, Decimal]]  # oldest first
+
+    def _is_step(self, index: int) -> bool:
+        prior, current = self.points[index - 1][1], self.points[index][1]
+        return (
+            prior > 0 and current > 0 and abs(_pct(prior, current)) > _STEP_CHANGE_PCT
+        )
+
+    @property
+    def step_changes(self) -> list[str]:
+        return [
+            self.points[i][0] for i in range(1, len(self.points)) if self._is_step(i)
+        ]
+
+    @property
+    def latest_move(self) -> tuple[str, int] | None:
+        """The latest change in words, and +1/-1 for which side it supports.
+
+        None when there is nothing to compare or the move is a step change
+        that would mislead as a growth rate.
+        """
+        if len(self.points) < 2 or self._is_step(len(self.points) - 1):
+            return None
+        (prior_period, prior), (period, current) = self.points[-2:]
+        months = (_period_key(period).year - _period_key(prior_period).year) * 12 + (
+            _period_key(period).month - _period_key(prior_period).month
+        )
+        span = (
+            f"in the year to {period}"
+            if months == 12
+            else f"from {prior_period} to {period}"
+        )
+        if prior > 0 and current > 0:
+            change = _pct(prior, current)
+            if change == 0:
+                return None
+            verb = "grew" if change > 0 else "fell"
+            return f"{self.label} {verb} {abs(change)}% {span}", 1 if change > 0 else -1
+        if prior <= 0 < current:
+            return f"{self.label} went from a loss to a profit {span}", 1
+        if current <= 0 < prior:
+            return f"{self.label} went from a profit to a loss {span}", -1
+        if current == prior:
+            return None
+        verb = "narrowed" if current > prior else "widened"
+        return f"{self.label} loss {verb} {span}", 1 if current > prior else -1
+
+
+def _series(result: SqlResult) -> list[_Series]:
+    by_category: dict[str, list[tuple[str, Decimal]]] = {}
+    for row in result.rows:
+        value = _number(row["value"])
+        try:
+            _period_key(str(row["period"]))
+        except ValueError:
+            continue
+        if value is not None:
+            by_category.setdefault(str(row["category"]), []).append(
+                (str(row["period"]), value)
+            )
+    labels = {"revenue": "Revenue", "net_profit": "Net profit"}
+    series = []
+    for category, label in labels.items():
+        points = sorted(by_category.get(category, []), key=lambda p: _period_key(p[0]))
+        # One extra period so the oldest shown still has a change to compare.
+        if points:
+            series.append(_Series(label, points[-(_TREND_PERIODS + 1) :]))
+    return series
+
+
+def _describe_series(series: _Series) -> str:
+    shown = series.points[-_TREND_PERIODS:]
+    path = " → ".join(f"{period} {value:,.2f}" for period, value in shown)
+    return f"{series.label}: {path}"
+
+
+def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
+    if quote.last_price is None or quote.last_price <= 0:
+        return [f"Live price unavailable: {quote.error or 'no valid price returned'}."]
+    price = Decimal(str(quote.last_price))
+    exchange = quote.exchange.removesuffix("_EQ") or "NSE"
+    lines = [f"Live price: {_money(price)} ({exchange}, {_ist(quote.fetched_at)})"]
+    if position.conflicting:
+        lines.append(
+            "Position value left out: the question gives more than one share "
+            "count or price."
+        )
+    if position.quantity is None:
+        return lines
+    value = position.quantity * price
+    lines.append(f"Your {position.quantity.normalize():f} shares: {_money(value)}")
+    if position.buy_price is not None:
+        cost = position.quantity * position.buy_price
+        gain = value - cost
+        word = "gain" if gain >= 0 else "loss"
+        lines.append(
+            f"Bought at {_money(position.buy_price)}: unrealised {word} "
+            f"{_money(abs(gain))} ({_pct(cost, value):+}%)"
+        )
+    return lines
+
+
+def _points(ratios: list[_Ratio], series: list[_Series]) -> tuple[list[str], list[str]]:
+    favour: list[str] = []
+    against: list[str] = []
+    for ratio in ratios:
+        if ratio.meaningless:
+            against.append(_describe_ratio(ratio))
+        elif ratio.standing:
+            (favour if ratio.standing > 0 else against).append(_describe_ratio(ratio))
+    for item in series:
+        move = item.latest_move
+        if move is not None:
+            (favour if move[1] > 0 else against).append(move[0])
+    return favour, against
+
+
+def _with_disclaimer(text: str) -> PathResult:
+    return PathResult(text=f"{text}\n\n{DISCLAIMER}")
+
+
+def review(question: str) -> PathResult:
+    """Render a review of the one company the question names."""
+    resolution = resolve_companies(question)
+    if resolution.error:
+        return _with_disclaimer(
+            f"I couldn't look up the company just now ({resolution.error}). "
+            "Please try again."
+        )
+    if len(resolution.companies) > 1:
+        names = " and ".join(c.ticker for c in resolution.companies)
+        return _with_disclaimer(
+            f"You mentioned {names}. I review one stock at a time so every "
+            "figure stays tied to the right company: ask about each separately, "
+            'e.g. "Should I keep my 10 TCS shares?".'
+        )
+    if not resolution.companies:
+        if not resolution.ambiguous:
+            return PathResult(text=NO_COMPANY)
+        names = "; ".join(f"{c.ticker} ({c.name})" for c in resolution.ambiguous)
+        return _with_disclaimer(
+            f"Which company do you mean: {names}? Ask again with the NSE symbol."
+        )
+    company = resolution.companies[0]
+
+    result = PathResult()
+    position = parse_position(question)
+    quote = get_live_quote(company.ticker, exchange="NSE")
+    result.quote_calls.append(quote)
+    params = {"ticker": company.ticker}
+    ratios_sql = run_sql(
+        "SELECT fr.name, fr.company_value, fr.sector_value, fr.fetched_at "
+        "FROM fundamental_ratios fr JOIN instruments i USING (instrument_key) "
+        "WHERE i.ticker = %(ticker)s AND i.exchange = 'NSE_EQ'",
+        params,
+    )
+    financials_sql = run_sql(
+        "SELECT ff.category, ff.period, ff.value FROM fundamental_financials ff "
+        "JOIN instruments i USING (instrument_key) "
+        "WHERE i.ticker = %(ticker)s AND i.exchange = 'NSE_EQ' "
+        "AND ff.statement = 'income_statement' AND ff.time_period = 'yearly' "
+        "AND ff.category IN ('revenue', 'net_profit')",
+        params,
+    )
+    result.sql_calls.extend([ratios_sql, financials_sql])
+    ratios = _ratios(ratios_sql)
+    series = _series(financials_sql)
+
+    intro = "I can't tell you to buy, sell or hold, but here is what the data says."
+    if resolution.set_aside:
+        others = ", ".join(f"{c.ticker} ({c.name})" for c in resolution.set_aside)
+        intro += f"\nAlso matched {others}: ask separately if you meant it."
+    sections = [
+        f"{company.name} ({company.ticker}): review\n{intro}",
+        "Your position\n"
+        + "\n".join(f"  {line}" for line in _position_lines(position, quote)),
+    ]
+    heading = "Valuation and quality vs sector"
+    if ratios_sql.error:
+        sections.append(f"{heading}\n  Data lookup failed: {ratios_sql.error}")
+    elif ratios:
+        fetched = _ist(ratios_sql.rows[0]["fetched_at"])
+        sections.append(
+            f"{heading} (as of {fetched})\n"
+            + "\n".join(f"  {_describe_ratio(r)}" for r in ratios)
+        )
+    else:
+        sections.append(f"{heading}\n  No ratio data for this company.")
+    heading = "Yearly results (INR crore)"
+    if financials_sql.error:
+        sections.append(f"{heading}\n  Data lookup failed: {financials_sql.error}")
+    elif series:
+        lines = [f"  {_describe_series(s)}" for s in series]
+        steps = sorted({p for s in series for p in s.step_changes}, key=_period_key)
+        if steps:
+            lines.append(
+                f"  Note: a move of over {_STEP_CHANGE_PCT}% in {', '.join(steps)} "
+                "often reflects a merger, demerger or one-off item, not "
+                "like-for-like growth."
+            )
+        sections.append(f"{heading}\n" + "\n".join(lines))
+    else:
+        sections.append(f"{heading}\n  No yearly revenue or profit data.")
+
+    favour, against = _points(ratios, series)
+    nothing = ["Nothing in this data stands out."]
+    sections.append(
+        "Points in favour\n" + "\n".join(f"  - {p}" for p in favour or nothing)
+    )
+    sections.append(
+        "Points against\n" + "\n".join(f"  - {p}" for p in against or nothing)
+    )
+    sections.append(
+        "Before deciding, ask yourself\n"
+        "  - What did you pay and how long have you held? Listed shares held "
+        "over 12 months are taxed as long-term capital gains, under 12 months "
+        "as short-term.\n"
+        "  - How much of your portfolio is this one stock?\n"
+        "  - Does your original reason for buying still hold, and what is your "
+        "time horizon?\n"
+        "  - Not covered here: news, 52-week range, technicals, analyst views."
+    )
+    sections.append(DISCLAIMER)
+    result.text = "\n\n".join(sections)
+    return result

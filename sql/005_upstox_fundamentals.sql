@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS fundamental_financials (
   statement      TEXT NOT NULL CHECK (statement IN ('income_statement', 'balance_sheet')),
   time_period    TEXT NOT NULL CHECK (time_period IN ('yearly', 'quarterly')),
   category       TEXT NOT NULL,        -- 'revenue', 'net_profit', 'total_asset', ...
-  period         TEXT NOT NULL,        -- Upstox's own label, e.g. 'FY2025', 'Q2FY26'
+  period         TEXT NOT NULL,        -- Upstox's own label: 'Mon YYYY' of the period end, e.g. 'Mar 2026'
   value          NUMERIC,
   fetched_at     TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (instrument_key, statement, time_period, category, period)

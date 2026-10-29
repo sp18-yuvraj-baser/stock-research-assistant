@@ -1,4 +1,13 @@
+"""The model tool loop: one path's prompt and tools against the local Ollama.
+
+Everything a caller can see from here is a PathResult or an OllamaError
+subclass: transport, status and JSON failures are mapped in `chat`, tool
+failures are fed back to the model, and a blank reply is retried and then
+reported, never returned as an empty answer.
+"""
+
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -6,100 +15,34 @@ import httpx
 
 from sra.agent.prompts import (
     FUNDAMENTALS_SYSTEM_PROMPT,
+    GENERAL_FINANCE_SYSTEM_PROMPT,
     LIVE_QUOTE_TOOL,
-    NARRATIVE_SYSTEM_PROMPT,
-    NUMERIC_SYSTEM_PROMPT,
     REALTIME_SYSTEM_PROMPT,
     RUN_SQL_TOOL,
-    SEARCH_FILINGS_TOOL,
 )
 from sra.config import settings
-from sra.ingest.fundamentals_run import ensure_fresh_fundamentals
 from sra.tools.get_live_quote import LiveQuote, get_live_quote
 from sra.tools.run_sql import SqlResult, run_sql
-from sra.tools.search_filings import DEFAULT_K, SearchResult, search_filings
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 6
 
 # A model that reissues a query it already ran is stuck rather than working;
 # without this it burns every remaining round on the same call and returns
-# nothing. Observed when a question needs a figure that XBRL does not tag.
+# nothing. Observed when a question needs a figure the tables do not hold.
 MAX_REPEATED_CALLS = 2
 
 
 @dataclass
 class PathResult:
-    """What one path produced, kept separate from the other path's evidence."""
+    """What one path produced: the answer and the tool calls behind it."""
 
     text: str = ""
     sql_calls: list[SqlResult] = field(default_factory=list)
-    search_calls: list[SearchResult] = field(default_factory=list)
     quote_calls: list[LiveQuote] = field(default_factory=list)
     rounds: int = 0
     stopped_early: bool = False
-
-    @property
-    def accessions(self) -> list[str]:
-        """Accession numbers this path actually read, in first-seen order."""
-        seen: dict[str, None] = {}
-        for call in self.sql_calls:
-            for row in call.rows:
-                value = row.get("accession_no")
-                if isinstance(value, str):
-                    seen.setdefault(value, None)
-        for search in self.search_calls:
-            for passage in search.passages:
-                seen.setdefault(passage.accession_no, None)
-        return list(seen)
-
-    @property
-    def periods(self) -> list[str]:
-        """Fiscal periods the SQL results covered, most recent first.
-
-        Used to scope the narrative path to the same periods the figures cover,
-        so a composed answer does not explain one quarter with another
-        quarter's commentary.
-        """
-        labels: dict[str, str] = {}
-        for call in self.sql_calls:
-            for row in call.rows:
-                period_end = row.get("period_end")
-                if not isinstance(period_end, str):
-                    continue
-                year = row.get("fiscal_year")
-                period = row.get("fiscal_period")
-                label = (
-                    f"{period} {year} (ended {period_end})"
-                    if year is not None and period is not None
-                    else f"period ended {period_end}"
-                )
-                labels[period_end] = label
-        return [labels[key] for key in sorted(labels, reverse=True)]
-
-    @property
-    def cited_values(self) -> set[str]:
-        """Every value run_sql or get_live_quote returned, for the
-        hallucinated-number check."""
-        sql_values = {
-            str(value)
-            for call in self.sql_calls
-            for row in call.rows
-            for value in row.values()
-            if value is not None
-        }
-        quote_values = {
-            str(q.last_price) for q in self.quote_calls if q.last_price is not None
-        }
-        return sql_values | quote_values
-
-    @property
-    def cited_sections(self) -> set[tuple[str, str]]:
-        """(section, accession) pairs actually retrieved, for citation scoring."""
-        return {
-            (passage.section, passage.accession_no)
-            for call in self.search_calls
-            for passage in call.passages
-        }
 
 
 class OllamaError(RuntimeError):
@@ -110,13 +53,19 @@ class ModelUnavailableError(OllamaError):
     """The local model server could not be reached at all."""
 
 
-def _chat(
+NO_ANSWER = "The model returned no answer. Try asking again or rephrasing the question."
+
+
+def chat(
     client: httpx.Client,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    *,
+    think: bool | None = None,
 ) -> dict[str, Any]:
+    """One /api/chat call; every failure surfaces as an OllamaError subclass."""
     try:
-        response = _post_chat(client, messages, tools)
+        response = _post_chat(client, messages, tools, think=think)
     except httpx.ConnectError as exc:
         raise ModelUnavailableError(
             f"cannot reach the model server at {settings().ollama_url}. "
@@ -126,6 +75,16 @@ def _chat(
         raise ModelUnavailableError(
             f"the model server at {settings().ollama_url} did not respond in time."
         ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise OllamaError(
+            f"{exc.response.status_code}: {exc.response.text[:300]}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        # A reset or protocol error mid-request: the server is not usable now.
+        raise ModelUnavailableError(
+            f"the model server at {settings().ollama_url} failed: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if response.status_code == 404:
         raise OllamaError(
             f"model {settings().generation_model!r} is not installed. "
@@ -133,7 +92,10 @@ def _chat(
         )
     if response.status_code != 200:
         raise OllamaError(f"{response.status_code}: {response.text[:300]}")
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise OllamaError(f"/api/chat returned invalid JSON: {exc}") from exc
     if not isinstance(payload, dict):
         raise OllamaError(f"expected a JSON object from /api/chat, got {type(payload)}")
     return payload
@@ -143,7 +105,12 @@ def _post_chat(
     client: httpx.Client,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
+    *,
+    think: bool | None = None,
 ) -> httpx.Response:
+    # None leaves the model's own default; a thinking model asked for a
+    # one-line rewrite otherwise spends most of its time reasoning about it.
+    extra = {} if think is None else {"think": think}
     return client.post(
         "/api/chat",
         json={
@@ -151,6 +118,7 @@ def _post_chat(
             "messages": messages,
             "tools": tools,
             "stream": False,
+            **extra,
             "options": {
                 # Figures are read from tool output, not sampled; keep the
                 # wording and the SQL as deterministic as the runtime allows.
@@ -174,34 +142,43 @@ def _tool_arguments(call: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _optional_str(value: object) -> str | None:
-    text = str(value).strip() if value is not None else ""
-    return text or None
+def _dispatch(
+    name: str,
+    arguments: dict[str, Any],
+    result: PathResult,
+    allowed: frozenset[str],
+) -> str:
+    """Run one tool call and record it for later scoring.
 
-
-def _dispatch(name: str, arguments: dict[str, Any], result: PathResult) -> str:
-    """Run one tool call and record it for later scoring."""
-    if name == "run_sql":
-        sql_result = run_sql(str(arguments.get("sql", "")))
-        result.sql_calls.append(sql_result)
-        return sql_result.to_text()
-    if name == "search_filings":
-        raw_k = arguments.get("k")
-        found = search_filings(
-            str(arguments.get("query", "")),
-            ticker=_optional_str(arguments.get("ticker")),
-            form_type=_optional_str(arguments.get("form_type")),
-            section=_optional_str(arguments.get("section")),
-            k=int(raw_k) if isinstance(raw_k, int) else DEFAULT_K,
+    Only tools the path was offered run: a confused or injected model must not
+    reach run_sql from the price path. A tool that raises is reported to the
+    model as an ERROR, like any other tool failure, rather than ending the
+    question.
+    """
+    if name not in allowed:
+        return f"ERROR: no tool named {name!r} is available"
+    try:
+        if name == "run_sql":
+            sql_result = run_sql(str(arguments.get("sql", "")))
+            result.sql_calls.append(sql_result)
+            return sql_result.to_text()
+        if name == "get_live_quote":
+            quote = get_live_quote(str(arguments.get("ticker", "")))
+            result.quote_calls.append(quote)
+            return quote.to_text()
+    except Exception as exc:
+        logger.exception("tool %s raised", name)
+        return (
+            f"ERROR: the {name} tool failed ({type(exc).__name__}). Say the data "
+            "could not be fetched; do not guess it."
         )
-        result.search_calls.append(found)
-        return found.to_text()
-    if name == "get_live_quote":
-        quote = get_live_quote(str(arguments.get("ticker", "")))
-        result.quote_calls.append(quote)
-        return quote.to_text()
-    # A path is given only its own tool, so this means the model invented one.
     return f"ERROR: no tool named {name!r} is available"
+
+
+def _usable(payload: dict[str, Any]) -> bool:
+    """A final answer that is neither blank nor cut off at the output limit."""
+    content = ((payload.get("message") or {}).get("content") or "").strip()
+    return bool(content) and payload.get("done_reason") != "length"
 
 
 def run_path(
@@ -218,17 +195,41 @@ def run_path(
     ]
     result = PathResult()
     seen_calls: dict[str, int] = {}
+    allowed = frozenset(str(tool["function"]["name"]) for tool in tools)
+    retried = False
 
     with httpx.Client(
         base_url=settings().ollama_url, timeout=httpx.Timeout(600.0)
     ) as client:
         for round_index in range(max_rounds):
-            payload = _chat(client, messages, tools)
+            payload = chat(client, messages, tools)
             message = payload.get("message", {})
             tool_calls = message.get("tool_calls") or []
             result.rounds = round_index + 1
 
+            if not tool_calls and not _usable(payload) and not retried:
+                # A thinking model can spend the whole output budget reasoning
+                # and emit no answer; asking again without thinking usually
+                # fits. Once per question, so a broken model cannot loop.
+                retried = True
+                logger.warning(
+                    "blank or truncated answer (done_reason=%s); retrying "
+                    "without thinking",
+                    payload.get("done_reason"),
+                )
+                payload = chat(client, messages, tools, think=False)
+                message = payload.get("message", {})
+                tool_calls = message.get("tool_calls") or []
+
             if not tool_calls:
+                if not _usable(payload):
+                    logger.warning(
+                        "no usable answer after retry (done_reason=%s)",
+                        payload.get("done_reason"),
+                    )
+                    result.stopped_early = True
+                    result.text = NO_ANSWER
+                    return result
                 result.text = (message.get("content") or "").strip()
                 return result
 
@@ -252,7 +253,7 @@ def run_path(
                         "state what is missing. Do not repeat it."
                     )
                 else:
-                    content = _dispatch(name, arguments, result)
+                    content = _dispatch(name, arguments, result, allowed)
                 messages.append(
                     {"role": "tool", "tool_name": name or "unknown", "content": content}
                 )
@@ -262,28 +263,8 @@ def run_path(
     return result
 
 
-def numeric_path(question: str, **kwargs: Any) -> PathResult:
-    """Figures only. Has no way to read filing text."""
-    return run_path(
-        question,
-        system_prompt=NUMERIC_SYSTEM_PROMPT,
-        tools=[RUN_SQL_TOOL],
-        **kwargs,
-    )
-
-
-def narrative_path(question: str, **kwargs: Any) -> PathResult:
-    """Filing text only. Has no way to look up a figure."""
-    return run_path(
-        question,
-        system_prompt=NARRATIVE_SYSTEM_PROMPT,
-        tools=[SEARCH_FILINGS_TOOL],
-        **kwargs,
-    )
-
-
 def realtime_path(question: str, **kwargs: Any) -> PathResult:
-    """Live NSE/BSE equity prices only. No SEC/XBRL or filing-text access."""
+    """Live NSE/BSE equity prices only."""
     return run_path(
         question,
         system_prompt=REALTIME_SYSTEM_PROMPT,
@@ -293,21 +274,29 @@ def realtime_path(question: str, **kwargs: Any) -> PathResult:
 
 
 def fundamentals_path(question: str, **kwargs: Any) -> PathResult:
-    """Nifty 50 ratios and financials only, via run_sql against those tables.
+    """NSE/BSE ratios and financials only, via run_sql against those tables.
 
-    Reuses the same run_sql tool the NUMERIC path uses: the tool itself is
-    schema-agnostic (sql_guard only validates that the SQL is a single
-    read-only statement), so a different system prompt describing a
-    different schema is all a new SQL-backed path needs.
+    The run_sql tool is schema-agnostic (sql_guard only validates that the SQL
+    is a single read-only statement), so the system prompt describing the
+    research tables is all this path adds.
 
-    Refreshes stale fundamentals from Upstox first (see
-    ensure_fresh_fundamentals), so the model always queries data no older
-    than the configured TTL rather than requiring a separate manual ingest.
+    Research refreshes run explicitly through the CLI rather than starting a
+    potentially multi-thousand-company provider sync while a user waits for a
+    chat response.
     """
-    ensure_fresh_fundamentals()
     return run_path(
         question,
         system_prompt=FUNDAMENTALS_SYSTEM_PROMPT,
         tools=[RUN_SQL_TOOL],
+        **kwargs,
+    )
+
+
+def general_finance_path(question: str, **kwargs: Any) -> PathResult:
+    """Educational finance explanations with no company-data tools."""
+    return run_path(
+        question,
+        system_prompt=GENERAL_FINANCE_SYSTEM_PROMPT,
+        tools=[],
         **kwargs,
     )
