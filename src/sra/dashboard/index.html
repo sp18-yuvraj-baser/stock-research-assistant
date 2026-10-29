@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Research Assistant</title>
+  <style>
+    :root {
+      --bg:#f5f7fa; --surface:#ffffff; --surface-2:#f0f3f7; --ink:#152231; --muted:#5f6f82;
+      --line:#dfe5ec; --brand:#0f3a56; --brand-ink:#ffffff; --accent:#13865f;
+      --user:#e3f1ea; --user-line:#c8e3d6;
+      --good:#0f7a52; --good-bg:#e3f4ec; --bad:#b4372f; --bad-bg:#fbe9e7;
+      --warn:#94620a; --warn-bg:#fdf2dc; --neutral-bg:#eef1f5;
+      --shadow:0 1px 2px rgba(16,34,52,.06), 0 4px 16px rgba(16,34,52,.05);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:#0e141b; --surface:#151d26; --surface-2:#1b2530; --ink:#e4ebf2; --muted:#93a3b5;
+        --line:#26323f; --brand:#8cc6ea; --brand-ink:#0e141b; --accent:#43c08f;
+        --user:#16302a; --user-line:#21463b;
+        --good:#5fd3a2; --good-bg:#14302a; --bad:#f08a80; --bad-bg:#3a1d1b;
+        --warn:#f0c062; --warn-bg:#3a2e14; --neutral-bg:#1f2a36;
+        --shadow:0 1px 2px rgba(0,0,0,.3);
+      }
+    }
+    * { box-sizing:border-box }
+    html, body { height:100% }
+    body { margin:0; display:flex; flex-direction:column; background:var(--bg); color:var(--ink);
+      font:15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif }
+    button { font:inherit; color:inherit }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+
+    header { flex:none; border-bottom:1px solid var(--line); background:var(--surface) }
+    .bar { width:min(920px,100%); margin:auto; padding:12px 16px; display:flex; align-items:center; gap:12px }
+    .logo { width:34px; height:34px; border-radius:9px; background:var(--brand); color:var(--brand-ink);
+      display:grid; place-items:center; font-weight:700; font-size:15px; flex:none }
+    .title h1 { margin:0; font-size:16px; letter-spacing:-.2px }
+    .title p { margin:0; font-size:12.5px; color:var(--muted) }
+    .ghost { margin-left:auto; border:1px solid var(--line); background:var(--surface); border-radius:9px;
+      padding:7px 12px; font-size:13px; cursor:pointer; white-space:nowrap; flex:none }
+    .ghost:hover { background:var(--surface-2) }
+
+    #scroller { flex:1; overflow-y:auto }
+    #messages { width:min(920px,100%); margin:auto; padding:24px 16px 32px; display:flex; flex-direction:column; gap:18px }
+
+    .welcome { text-align:center; padding:40px 8px 8px }
+    .welcome h2 { margin:0 0 6px; font-size:24px; letter-spacing:-.4px }
+    .welcome p { margin:0 auto 20px; color:var(--muted); max-width:560px }
+    .chips { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; text-align:left }
+    .chip { border:1px solid var(--line); background:var(--surface); border-radius:12px; padding:12px 14px;
+      cursor:pointer; box-shadow:var(--shadow); text-align:left }
+    .chip:hover { border-color:var(--accent) }
+    .chip b { display:block; font-size:13.5px; margin-bottom:2px }
+    .chip span { color:var(--muted); font-size:12.5px }
+    .welcome a { color:var(--brand) }
+
+    .msg { display:flex; flex-direction:column; gap:6px; max-width:100% }
+    .msg.user { align-self:flex-end; max-width:min(640px,88%) }
+    .msg.user .bubble { background:var(--user); border:1px solid var(--user-line); border-radius:16px 16px 4px 16px;
+      padding:10px 14px; white-space:pre-wrap; overflow-wrap:anywhere }
+    .msg.bot { align-self:stretch }
+    .card { background:var(--surface); border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:16px 18px; overflow-wrap:anywhere }
+    .msg.error .card { border-color:var(--bad); color:var(--bad) }
+    .label { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12px; color:var(--muted) }
+    .badge { border-radius:999px; padding:2px 9px; background:var(--neutral-bg); color:var(--ink); font-weight:600; font-size:11.5px }
+    .interpreted { font-size:12.5px; color:var(--muted); font-style:italic }
+
+    .answer h3 { margin:0 0 4px; font-size:17px; letter-spacing:-.2px }
+    .answer .lede { margin:0 0 14px; color:var(--muted) }
+    .answer p { margin:0 0 10px }
+    .answer p:last-child { margin-bottom:0 }
+    .section { margin:0 0 14px }
+    .section h4 { margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted) }
+    .rows { list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:10px; overflow:hidden }
+    .rows li { padding:8px 12px }
+    .tag { margin-left:4px }
+    .rows li + li { border-top:1px solid var(--line) }
+    .rows li:nth-child(even) { background:var(--surface-2) }
+    .bullets { margin:0; padding-left:20px }
+    .bullets li { margin:3px 0 }
+    .pair { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:0 0 14px }
+    .pair .section { margin:0; border-radius:10px; padding:10px 12px 10px 12px }
+    .pair .favour { background:var(--good-bg) } .pair .favour h4 { color:var(--good) }
+    .pair .against { background:var(--bad-bg) } .pair .against h4 { color:var(--bad) }
+    .tag { border-radius:6px; padding:1px 7px; font-size:12px; font-weight:600; white-space:nowrap }
+    .tag.good { background:var(--good-bg); color:var(--good) }
+    .tag.bad { background:var(--bad-bg); color:var(--bad) }
+    .tag.warn { background:var(--warn-bg); color:var(--warn) }
+    .tag.neutral { background:var(--neutral-bg); color:var(--muted) }
+    .disclaimer { margin:6px 0 0; padding-top:10px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--muted) }
+
+    details.trace { font-size:12.5px; color:var(--muted) }
+    details.trace summary { cursor:pointer; width:max-content }
+    details.trace p { margin:4px 0 0 }
+
+    .typing { display:inline-flex; gap:4px; padding:4px 0 }
+    .typing i { width:7px; height:7px; border-radius:50%; background:var(--muted); animation:blink 1.2s infinite ease-in-out }
+    .typing i:nth-child(2) { animation-delay:.15s } .typing i:nth-child(3) { animation-delay:.3s }
+    @keyframes blink { 0%,80%,100% { opacity:.25 } 40% { opacity:1 } }
+    @media (prefers-reduced-motion: reduce) { .typing i { animation:none; opacity:.6 } }
+
+    footer { flex:none; border-top:1px solid var(--line); background:var(--surface) }
+    form { width:min(920px,100%); margin:auto; padding:12px 16px 6px }
+    .composer { display:flex; align-items:flex-end; gap:8px; border:1px solid var(--line); background:var(--bg);
+      border-radius:14px; padding:6px }
+    .composer:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent) }
+    textarea { flex:1; border:0; background:transparent; resize:none; padding:9px 6px; min-height:40px; max-height:180px;
+      font:inherit; color:inherit; outline:none }
+    textarea:focus-visible { outline:none }
+    .icon { flex:none; width:40px; height:40px; border-radius:10px; border:0; background:transparent; display:grid;
+      place-items:center; cursor:pointer; color:var(--muted) }
+    .icon:hover { background:var(--surface-2); color:var(--ink) }
+    #send { background:var(--brand); color:var(--brand-ink) }
+    #send:hover { filter:brightness(1.1); background:var(--brand); color:var(--brand-ink) }
+    #send:disabled { opacity:.5; cursor:wait }
+    .fine { width:min(920px,100%); margin:auto; padding:0 16px 10px; font-size:11.5px; color:var(--muted); text-align:center }
+
+    @media (max-width:640px) {
+      .pair { grid-template-columns:1fr }
+      .title p { display:none }
+      .card { padding:14px }
+      .welcome { padding-top:20px }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <div class="logo" aria-hidden="true">₹</div>
+      <div class="title">
+        <h1>Indian Stock Research Assistant</h1>
+        <p>NSE/BSE live prices, fundamentals and holding reviews</p>
+      </div>
+      <button class="ghost" id="newChat" type="button">New chat</button>
+    </div>
+  </header>
+
+  <div id="scroller">
+    <section id="messages" aria-live="polite" aria-label="Conversation"></section>
+  </div>
+
+  <footer>
+    <form id="chatForm">
+      <div class="composer">
+        <textarea id="message" rows="1" aria-label="Your question" placeholder="Ask about an NSE/BSE stock, a holding, or a finance concept…"></textarea>
+        <button class="icon" id="send" type="submit" aria-label="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </button>
+      </div>
+    </form>
+    <p class="fine">Research, not investment advice. Answers use available data and state their limits. Enter to send, Shift+Enter for a new line.</p>
+  </footer>
+
+  <template id="welcomeTemplate">
+    <div class="welcome">
+      <h2>What would you like to research?</h2>
+      <p>Ask about a stock you hold, a company's fundamentals, a live price, or a market concept. Follow-up questions keep the context of this chat.</p>
+      <div class="chips">
+        <button class="chip" type="button" data-question="I have 100 HDFC Bank shares bought at 1500, should I keep or sell them?"><b>Review a holding</b><span>100 HDFC Bank shares bought at ₹1,500</span></button>
+        <button class="chip" type="button" data-question="What's TCS trading at right now?"><b>Live price</b><span>What's TCS trading at right now?</span></button>
+        <button class="chip" type="button" data-question="Compare TCS vs Infosys fundamentals."><b>Compare fundamentals</b><span>TCS vs Infosys</span></button>
+        <button class="chip" type="button" data-question="What is the meaning of ROE?"><b>Learn a concept</b><span>What is ROE?</span></button>
+      </div>
+    </div>
+  </template>
+
+  <script>
+    const messages = document.getElementById('messages');
+    const scroller = document.getElementById('scroller');
+    const input = document.getElementById('message');
+    const form = document.getElementById('chatForm');
+    const send = document.getElementById('send');
+
+    // The server is stateless: the browser keeps the conversation and sends
+    // the recent part with each question so follow-ups can be understood.
+    const STORE_KEY = 'sra.chat.v1';
+    const HISTORY_SENT = 10;
+    const ASSISTANT_CHARS_SENT = 1500;
+    const ROUTE_LABELS = {
+      advice: 'Holding review', realtime: 'Live price', fundamentals: 'Fundamentals',
+      general_finance: 'Explainer', out_of_scope: 'Out of scope',
+    };
+    let conversation = [];
+
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    };
+
+    function save() {
+      try { sessionStorage.setItem(STORE_KEY, JSON.stringify(conversation)); } catch (_) {}
+    }
+    function load() {
+      try { return JSON.parse(sessionStorage.getItem(STORE_KEY) || '[]'); } catch (_) { return []; }
+    }
+
+    const scrollToEnd = () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
+
+    // Inline text: **bold** from model answers, and coloured tags for the
+    // comparisons the holding review prints.
+    const TAGS = [
+      [/(better than sector|cheaper than sector|went from a loss to a profit|loss narrowed|unrealised gain)/, 'good'],
+      [/(weaker than sector|pricier than sector|went from a profit to a loss|loss widened|unrealised loss)/, 'bad'],
+      [/(sector figure looks unreliable|not meaningful)/, 'warn'],
+      [/(in line with sector|no sector figure)/, 'neutral'],
+    ];
+    function inline(text, parent) {
+      const parts = text.split(/(\*\*[^*]+\*\*)/);
+      for (const part of parts) {
+        if (!part) continue;
+        if (part.startsWith('**') && part.endsWith('**')) { parent.append(el('strong', '', part.slice(2, -2))); continue; }
+        let rest = part;
+        while (rest) {
+          let hit = null;
+          for (const [pattern, kind] of TAGS) {
+            const m = rest.match(pattern);
+            if (m && (!hit || m.index < hit.index)) hit = { index: m.index, text: m[0], kind };
+          }
+          if (!hit) { parent.append(rest); break; }
+          // "(sector figure looks unreliable)" reads as a tag, not "( tag )".
+          let before = rest.slice(0, hit.index);
+          let after = rest.slice(hit.index + hit.text.length);
+          if (/\(\s*$/.test(before) && /^\s*\)/.test(after)) {
+            before = before.replace(/\s*\(\s*$/, '');
+            after = after.replace(/^\s*\)/, '');
+          }
+          parent.append(before.replace(/:\s*$/, ''));
+          parent.append(el('span', `tag ${hit.kind}`, hit.text));
+          rest = after;
+        }
+      }
+      return parent;
+    }
+
+    function listOf(lines, bulleted) {
+      const list = el('ul', bulleted ? 'bullets' : 'rows');
+      for (const line of lines) list.append(inline(line.replace(/^\s*[-*•]\s+/, ''), el('li')));
+      return list;
+    }
+
+    // Answers are plain text: blocks separated by blank lines, a heading line
+    // followed by indented rows or "- " bullets. Render that structure; any
+    // other text stays paragraphs. Built with textContent only, never HTML.
+    function renderAnswer(text) {
+      const root = el('div', 'answer');
+      const blocks = text.replace(/\r/g, '').split(/\n\s*\n/).map(b => b.replace(/\s+$/, '')).filter(Boolean);
+      const pending = [];
+      blocks.forEach((block, index) => {
+        const lines = block.split('\n');
+        const head = lines[0];
+        const body = lines.slice(1);
+        if (/^This is research, not investment advice/.test(block)) { root.append(inline(block, el('p', 'disclaimer'))); return; }
+        if (index === 0 && /: review$/.test(head)) {
+          root.append(el('h3', '', head.replace(/: review$/, '')));
+          if (body.length) root.append(inline(body.join(' '), el('p', 'lede')));
+          return;
+        }
+        if (body.length && body.every(line => /^\s+\S/.test(line))) {
+          const bulleted = body.every(line => /^\s*[-*•]\s/.test(line));
+          const section = el('div', 'section');
+          section.append(el('h4', '', head));
+          section.append(listOf(body.map(l => l.trim()), bulleted));
+          if (/^Points in favour/.test(head)) { section.classList.add('favour'); pending.push(section); }
+          else if (/^Points against/.test(head)) {
+            section.classList.add('against'); pending.push(section);
+            const pair = el('div', 'pair'); pair.append(...pending.splice(0)); root.append(pair);
+          } else root.append(section);
+          return;
+        }
+        if (lines.every(line => /^\s*[-*•]\s/.test(line))) { root.append(listOf(lines, true)); return; }
+        if (body.length && body.every(line => /^\s*[-*•]\s/.test(line))) {
+          root.append(inline(head, el('p')));
+          root.append(listOf(body, true));
+          return;
+        }
+        root.append(inline(lines.join('\n'), el('p')));
+        root.lastChild.style.whiteSpace = 'pre-wrap';
+      });
+      if (pending.length) root.append(...pending);
+      return root;
+    }
+
+    function traceText(trace) {
+      const parts = [trace.source];
+      if (trace.database_queries) parts.push(`${trace.database_queries} database ${trace.database_queries === 1 ? 'query' : 'queries'}`);
+      if (trace.live_quote_requests) parts.push(`${trace.live_quote_requests} live ${trace.live_quote_requests === 1 ? 'quote' : 'quotes'}`);
+      return parts.join(' · ');
+    }
+
+    function renderTurn(turn) {
+      document.querySelector('.welcome')?.remove();
+      if (turn.role === 'user') {
+        const wrap = el('div', 'msg user');
+        wrap.append(el('div', 'bubble', turn.content));
+        messages.append(wrap);
+        return wrap;
+      }
+      const wrap = el('div', `msg bot${turn.error ? ' error' : ''}`);
+      const label = el('div', 'label');
+      label.append(el('span', 'badge', turn.error ? 'Error' : ROUTE_LABELS[turn.route] || 'Assistant'));
+      if (turn.interpreted_as) label.append(el('span', 'interpreted', `Understood as: “${turn.interpreted_as}”`));
+      const card = el('div', 'card');
+      card.append(turn.error ? el('p', '', turn.content) : renderAnswer(turn.content));
+      wrap.append(label, card);
+      if (turn.trace) {
+        const details = el('details', 'trace');
+        details.append(el('summary', '', 'How this was researched'), el('p', '', traceText(turn.trace)));
+        wrap.append(details);
+      }
+      messages.append(wrap);
+      return wrap;
+    }
+
+    function addTurn(turn) {
+      conversation.push(turn);
+      save();
+      const node = renderTurn(turn);
+      scrollToEnd();
+      return node;
+    }
+
+    function showWelcome() {
+      messages.replaceChildren(document.getElementById('welcomeTemplate').content.cloneNode(true));
+      messages.querySelectorAll('.chip').forEach(chip =>
+        chip.addEventListener('click', () => submitMessage(chip.dataset.question)));
+    }
+
+    function historyForServer() {
+      return conversation
+        .filter(turn => !turn.error)
+        .slice(-HISTORY_SENT)
+        .map(turn => ({ role: turn.role, content: turn.content.slice(0, ASSISTANT_CHARS_SENT) }));
+    }
+
+    function setBusy(busy) {
+      send.disabled = busy;
+      input.readOnly = busy;
+    }
+
+    function showTyping() {
+      document.querySelector('.welcome')?.remove();
+      const wrap = el('div', 'msg bot');
+      const card = el('div', 'card');
+      const dots = el('span', 'typing');
+      dots.setAttribute('aria-label', 'Researching');
+      dots.append(el('i'), el('i'), el('i'));
+      card.append(dots);
+      wrap.append(card);
+      messages.append(wrap);
+      scrollToEnd();
+      return wrap;
+    }
+
+    async function submitMessage(text) {
+      const message = text.trim();
+      if (!message || send.disabled) return;
+      const history = historyForServer();
+      addTurn({ role: 'user', content: message });
+      input.value = ''; autosize();
+      setBusy(true);
+      const typing = showTyping();
+      try {
+        const response = await fetch('/api/chat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, history }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || 'Request failed.');
+        typing.remove();
+        addTurn({
+          role: 'assistant', content: payload.answer, route: payload.route,
+          interpreted_as: payload.interpreted_as, trace: payload.research_summary,
+        });
+      } catch (error) {
+        typing.remove();
+        addTurn({ role: 'assistant', content: error.message || 'Request failed.', error: true });
+      } finally {
+        setBusy(false);
+        input.focus();
+      }
+    }
+
+    function autosize() {
+      input.style.height = 'auto';
+      input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    }
+    input.addEventListener('input', autosize);
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (send.disabled) return;
+      const question = input.value;
+      await submitMessage(question);
+    });
+
+    document.getElementById('newChat').addEventListener('click', () => {
+      conversation = [];
+      save();
+      showWelcome();
+      input.focus();
+    });
+
+    conversation = load();
+    if (conversation.length) conversation.forEach(renderTurn); else showWelcome();
+    scroller.scrollTop = scroller.scrollHeight;
+    input.focus();
+  </script>
+</body>
+</html>

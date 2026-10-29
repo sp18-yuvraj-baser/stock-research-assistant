@@ -1,13 +1,16 @@
+import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import psycopg
-from psycopg.rows import dict_row
 
-from sra.config import settings
+from sra.db import connect
 from sra.upstox.client import UpstoxClient, UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
+
+log = logging.getLogger(__name__)
 
 
 class QuoteClient(Protocol):
@@ -33,18 +36,37 @@ class LiveQuote:
         return (
             f"{self.ticker} ({self.instrument_key}, {self.exchange}): "
             f"last price {self.last_price} INR, fetched at {self.fetched_at} UTC. "
-            "This is a live quote, not a figure from a SEC filing."
+            "This is a live NSE/BSE quote from Upstox."
         )
 
 
-def resolve_instrument_key(ticker: str) -> tuple[str, str]:
-    with psycopg.connect(settings().readonly_dsn, row_factory=dict_row) as conn:
-        row = conn.execute(
-            "SELECT instrument_key, exchange FROM instruments WHERE ticker = upper(%s)",
-            (ticker,),
-        ).fetchone()
+def resolve_instrument_key(
+    ticker: str, *, exchange: str | None = None
+) -> tuple[str, str]:
+    with connect(readonly=True) as conn:
+        if exchange is None:
+            row = conn.execute(
+                "SELECT instrument_key, exchange FROM instruments "
+                "WHERE ticker = upper(%s) "
+                # NSE is the primary listing; BSE only when NSE lacks the symbol.
+                "ORDER BY exchange = 'NSE_EQ' DESC, exchange LIMIT 1",
+                (ticker,),
+            ).fetchone()
+        else:
+            segment = (
+                f"{exchange.upper()}_EQ"
+                if exchange.upper() in {"NSE", "BSE"}
+                else exchange.upper()
+            )
+            row = conn.execute(
+                "SELECT instrument_key, exchange FROM instruments "
+                "WHERE ticker = upper(%s) AND exchange = upper(%s)",
+                (ticker, segment),
+            ).fetchone()
     if row is None:
-        raise UnknownInstrumentError(f"{ticker!r} is not a tracked NSE instrument")
+        raise UnknownInstrumentError(
+            f"{ticker!r} is not in the synced NSE/BSE equity universe"
+        )
     return str(row["instrument_key"]), str(row["exchange"])
 
 
@@ -52,23 +74,64 @@ def _log_quote(instrument_key: str, last_price: float | None, fetched_at: str) -
     """Best-effort audit write; a logging failure is never a reason to
     withhold a live price the model already has."""
     try:
-        with psycopg.connect(settings().dsn) as conn:
+        with connect() as conn:
             conn.execute(
                 "INSERT INTO quotes (instrument_key, fetched_at, last_price) "
                 "VALUES (%s, %s, %s)",
                 (instrument_key, fetched_at, last_price),
             )
             conn.commit()
-    except psycopg.Error:
-        pass
+    except psycopg.Error as exc:
+        log.warning("could not log quote for %s: %s", instrument_key, exc)
 
 
-def get_live_quote(ticker: str, *, client: QuoteClient | None = None) -> LiveQuote:
+def _price_from(payload: Any, instrument_key: str) -> float | None:
+    """The finite last price for instrument_key, or None if the payload has none."""
+    # Upstox keys the response by "SEGMENT:TRADING_SYMBOL" (e.g. "NSE_EQ:TCS"),
+    # not by the instrument_key used to request it -- the instrument_key comes
+    # back inside each entry as instrument_token instead. One instrument_key
+    # is requested per call, so match on instrument_token rather than assume
+    # a key format that isn't documented to be stable.
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(entries, dict):
+        return None
+    for entry in entries.values():
+        if isinstance(entry, dict) and entry.get("instrument_token") == instrument_key:
+            raw = entry.get("last_price")
+            if raw is None:
+                return None
+            try:
+                price = float(raw)
+            except (TypeError, ValueError):
+                return None
+            return price if math.isfinite(price) else None
+    return None
+
+
+def get_live_quote(
+    ticker: str, *, exchange: str | None = None, client: QuoteClient | None = None
+) -> LiveQuote:
+    """Fetch a live quote. Every failure comes back as LiveQuote.error, never
+    as an exception, so one bad lookup cannot abort the answer being built."""
     fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
     try:
-        instrument_key, exchange = resolve_instrument_key(ticker)
+        if exchange is None:
+            instrument_key, resolved_exchange = resolve_instrument_key(ticker)
+        else:
+            instrument_key, resolved_exchange = resolve_instrument_key(
+                ticker, exchange=exchange
+            )
     except UnknownInstrumentError as exc:
         return LiveQuote(ticker, "", "", None, fetched_at, error=str(exc))
+    except psycopg.Error as exc:
+        return LiveQuote(
+            ticker,
+            "",
+            "",
+            None,
+            fetched_at,
+            error=f"could not look up the instrument: {str(exc).strip()}",
+        )
 
     try:
         with client or UpstoxClient() as c:
@@ -77,28 +140,18 @@ def get_live_quote(ticker: str, *, client: QuoteClient | None = None) -> LiveQuo
             )
     except UpstoxError as exc:
         return LiveQuote(
-            ticker, instrument_key, exchange, None, fetched_at, error=str(exc)
+            ticker, instrument_key, resolved_exchange, None, fetched_at, error=str(exc)
         )
 
-    # Upstox keys the response by "SEGMENT:TRADING_SYMBOL" (e.g. "NSE_EQ:TCS"),
-    # not by the instrument_key used to request it -- the instrument_key comes
-    # back inside each entry as instrument_token instead. One instrument_key
-    # is requested per call, so match on instrument_token rather than assume
-    # a key format that isn't documented to be stable.
-    data: dict[str, Any] = next(
-        (
-            entry
-            for entry in payload.get("data", {}).values()
-            if entry.get("instrument_token") == instrument_key
-        ),
-        {},
-    )
-    last_price = data.get("last_price")
+    last_price = _price_from(payload, instrument_key)
+    if last_price is None:
+        return LiveQuote(
+            ticker,
+            instrument_key,
+            resolved_exchange,
+            None,
+            fetched_at,
+            error=f"Upstox returned no usable price for {instrument_key}",
+        )
     _log_quote(instrument_key, last_price, fetched_at)
-    return LiveQuote(
-        ticker,
-        instrument_key,
-        exchange,
-        float(last_price) if last_price is not None else None,
-        fetched_at,
-    )
+    return LiveQuote(ticker, instrument_key, resolved_exchange, last_price, fetched_at)

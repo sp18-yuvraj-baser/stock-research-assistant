@@ -6,8 +6,6 @@
 REVOKE ALL ON SCHEMA public FROM sra_reader;
 GRANT USAGE ON SCHEMA public TO sra_reader;
 
-GRANT SELECT ON companies, filings, facts, chunks, facts_current TO sra_reader;
-
 -- A runaway query cannot occupy the demo machine, and no statement the model
 -- emits can write even if it reaches the server.
 ALTER ROLE sra_reader SET statement_timeout = '5s';

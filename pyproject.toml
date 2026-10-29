@@ -1,18 +1,23 @@
 [project]
 name = "stock-research-assistant"
 version = "0.1.0"
-description = "Question answering over SEC filings, grounded in XBRL facts and filing text"
+description = "Local research chat for NSE/BSE Indian equities, grounded in live quotes and fundamentals"
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.2",
     "httpx>=0.28",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
-    "lxml>=5.3",
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "ruff>=0.9", "mypy>=1.14", "lxml-stubs>=0.5"]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+    "mypy>=1.14",
+]
 
 [project.scripts]
 sra = "sra.cli:main"

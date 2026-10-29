@@ -1,6 +1,5 @@
--- Indian-equities (NSE/BSE) live-quote universe via Upstox. A separate
--- universe from companies/filings/facts/chunks: Upstox does not cover US
--- SEC filers, and these tickers have no XBRL facts or filing text here.
+-- Indian-equities (NSE/BSE) instrument universe and live-quote audit log via
+-- Upstox.
 
 CREATE TABLE IF NOT EXISTS instruments (
   instrument_key  TEXT PRIMARY KEY,     -- Upstox's key, e.g. 'NSE_EQ|INE467B01029'

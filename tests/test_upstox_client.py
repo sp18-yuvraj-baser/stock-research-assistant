@@ -3,7 +3,12 @@ from typing import Any
 import httpx
 import pytest
 
-from sra.upstox.client import UpstoxAuthError, UpstoxClient, UpstoxError
+from sra.upstox.client import (
+    MAX_RETRY_WAIT_SECONDS,
+    UpstoxAuthError,
+    UpstoxClient,
+    UpstoxError,
+)
 
 
 def _transport(status_code: int, body: dict[str, Any]) -> httpx.MockTransport:
@@ -56,3 +61,100 @@ def test_transient_5xx_recovers_on_retry() -> None:
         )
     assert result == {"data": {}}
     assert attempts_made["n"] == 2
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record retry waits instead of sleeping. The rate limiter is silenced so
+    only backoff waits are captured."""
+    recorded: list[float] = []
+    monkeypatch.setattr("sra.upstox.client.time.sleep", recorded.append)
+    monkeypatch.setattr(UpstoxClient, "_throttle", lambda _self: None)
+    return recorded
+
+
+def _counting(
+    status: int, headers: dict[str, str] | None = None
+) -> tuple[httpx.MockTransport, list[int]]:
+    hits: list[int] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        hits.append(1)
+        return httpx.Response(status, json={}, headers=headers)
+
+    return httpx.MockTransport(handler), hits
+
+
+def test_no_sleep_after_the_final_failed_attempt(sleeps: list[float]) -> None:
+    transport, hits = _counting(503)
+    with (
+        UpstoxClient(token="t", transport=transport) as c,
+        pytest.raises(UpstoxError, match="giving up"),
+    ):
+        c.get_json("/x", params={}, attempts=3)
+    assert len(hits) == 3
+    assert sleeps == [1.0, 2.0]  # between attempts only, none after the third
+
+
+def test_worst_case_wait_is_bounded(sleeps: list[float]) -> None:
+    transport, _hits = _counting(503)
+    with UpstoxClient(token="t", transport=transport) as c, pytest.raises(UpstoxError):
+        c.get_json("/x", params={}, attempts=8)
+    assert len(sleeps) == 7
+    assert max(sleeps) <= MAX_RETRY_WAIT_SECONDS
+
+
+def test_retry_after_is_honoured_but_capped(sleeps: list[float]) -> None:
+    transport, _hits = _counting(429, {"Retry-After": "3"})
+    with UpstoxClient(token="t", transport=transport) as c, pytest.raises(UpstoxError):
+        c.get_json("/x", params={}, attempts=3)
+    assert sleeps == [3.0, 3.0]
+
+    sleeps.clear()
+    transport, _hits = _counting(429, {"Retry-After": "86400"})
+    with UpstoxClient(token="t", transport=transport) as c, pytest.raises(UpstoxError):
+        c.get_json("/x", params={}, attempts=2)
+    assert sleeps == [MAX_RETRY_WAIT_SECONDS]
+
+
+@pytest.mark.parametrize("header", ["Wed, 21 Oct 2026 07:28:00 GMT", "nan", "-5", ""])
+def test_unusable_retry_after_falls_back_to_backoff(
+    sleeps: list[float], header: str
+) -> None:
+    transport, _hits = _counting(429, {"Retry-After": header})
+    with UpstoxClient(token="t", transport=transport) as c, pytest.raises(UpstoxError):
+        c.get_json("/x", params={}, attempts=3)
+    assert all(0 <= s <= MAX_RETRY_WAIT_SECONDS for s in sleeps)
+    assert len(sleeps) == 2
+
+
+def test_401_is_not_retried(sleeps: list[float]) -> None:
+    transport, hits = _counting(401)
+    with (
+        UpstoxClient(token="t", transport=transport) as c,
+        pytest.raises(UpstoxAuthError),
+    ):
+        c.get_json("/x", params={})
+    assert len(hits) == 1
+    assert sleeps == []
+
+
+def test_non_json_200_is_an_upstox_error() -> None:
+    transport = httpx.MockTransport(lambda _r: httpx.Response(200, text="<html>"))
+    with (
+        UpstoxClient(token="t", transport=transport) as c,
+        pytest.raises(UpstoxError, match="non-JSON"),
+    ):
+        c.get_json("/x", params={})
+
+
+def test_network_errors_are_retried_then_reported(sleeps: list[float]) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    with (
+        UpstoxClient(token="t", transport=httpx.MockTransport(handler)) as c,
+        pytest.raises(UpstoxError, match="giving up"),
+    ):
+        c.get_json("/x", params={}, attempts=2)
+    assert sleeps == [1.0]

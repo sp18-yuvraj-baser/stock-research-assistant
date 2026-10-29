@@ -1,4 +1,5 @@
--- The narrative path needs the filing's main document to fetch its HTML.
--- submissions.json already carries the name, so storing it here avoids an
--- extra request per filing to read the archive index.
-ALTER TABLE filings ADD COLUMN IF NOT EXISTS primary_document TEXT;
+-- Superseded: this file used to add filings.primary_document for the SEC
+-- narrative path. The filings table no longer exists (see
+-- 007_drop_sec_schema.sql). Kept as a no-op so migration filenames stay
+-- stable for the schema_migrations ledger.
+SELECT 1;

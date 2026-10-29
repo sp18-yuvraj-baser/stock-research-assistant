@@ -1,11 +1,8 @@
-"""Decide which path a question needs.
+"""Deterministically route Indian-equity research questions.
 
-Rule-based rather than an LLM classifier. The rules are deterministic, so the
-same question always routes the same way and a routing failure is reproducible
-and fixable; an LLM classifier would have to be scored statistically and would
-add a model call to every question's latency. The cost is coverage: a question
-using vocabulary absent from these lists falls to the default, and every route
-carries the features that produced it so misroutes are diagnosable.
+Routing is a pure function of the text. Whether the text names a listed
+company needs the instruments table, so the caller looks that up and passes
+the answer in as `names_company` rather than this module touching the DB.
 """
 
 import re
@@ -14,12 +11,11 @@ from enum import StrEnum
 
 
 class Route(StrEnum):
-    NUMERIC = "numeric"
-    NARRATIVE = "narrative"
-    HYBRID = "hybrid"
     ADVICE = "advice"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
+    GENERAL_FINANCE = "general_finance"
+    OUT_OF_SCOPE = "out_of_scope"
 
 
 @dataclass(frozen=True)
@@ -28,217 +24,102 @@ class Routing:
     reasons: tuple[str, ...]
 
 
-# Asking for a recommendation must be caught every time, so these are matched
-# before anything else and kept deliberately broad.
+# Asking what to do about a stock is always answered with a holding review,
+# never a verdict, so these are matched before anything else and kept broad.
 _ADVICE = (
-    r"should i (buy|sell|hold|invest|own|avoid)",
+    r"(?<!how )(?<!how long )\b(should|shall|can|could|must) (i|we) (buy|sell|hold"
+    r"|keep|exit|invest|own|avoid|add|accumulate|average|book|continue|stay"
+    r"|get out)",
+    r"\bis it (wise|safe|better|okay|ok|right|a good idea|the right time|time)\b"
+    r".{0,25}\b(keep|hold|sell|exit|buy|get out)",
+    r"\b(would|will) you (sell|buy|hold|keep|exit)\b",
     r"(is|are) (it|this|that|they|\w+) a (good|bad|smart|safe)"
     r" (buy|investment|stock|bet)",
     r"worth (buying|selling|holding|investing)",
-    r"price target",
-    # A company name sits between the verb and the noun in practice:
-    # "Will Microsoft's stock go up next quarter?"
     r"(will|would|could)\b.{0,40}?\b(stock|shares?|share price|price)\b"
     r".{0,20}?\b(go|rise|fall|drop|climb|reach|hit|outperform|be worth)",
+    r"\bcan\b.{0,40}\b(reach|hit|cross|touch)\s*(rs\.?|₹)?\s*\d",
     r"what.{0,20}(stock|shares?) (should|to) (i|we) (buy|sell|pick)",
-    # "Can you recommend a semiconductor stock to buy?" -- the qualifier sits
-    # between the article and the noun.
     r"(recommend|advise)\b.{0,40}?\b(stock|shares?|buy|sell|investment|purchase)",
-    r"(which|what) (stock|shares?|company).{0,30}(should|would) (i|we)",
+    r"(which|what) (?:[a-z]+\s+){0,3}(stock|shares?|company)"
+    r".{0,30}(should|would) (i|we)",
     r"what should (i|we) (buy|sell|invest|own)",
     r"do you (think|believe).{0,30}(buy|sell|invest|outperform|go up|go down)",
+    # Hinglish: "rakhu ya bechu", "sell kar du?", "kya karu", "lena chahiye".
+    r"\b(rakhu|rakhun|rakh lu|bechu|bechun|bech du|bech dun|bechna|nikal du"
+    r"|nikal dun|nikalu|kharidu|kharid lu|kharidna)\b",
+    r"\b(sell|buy|hold|exit|keep|invest)\s+(karu|karun|karna|kar du|kar dun"
+    r"|karein|kare)\b",
+    r"\bkya (karu|karun|karein|kare)\b",
+    r"\b(lena|lu|lun) chahiye\b",
+    r"\bka target\b",
+    r"\b(girega|badhega|chadhega)\b",
+)
+
+# Owning shares and asking what now is the core holding question, however
+# vaguely the ask is put ("I own 300 Infosys shares. Thoughts?").
+_HOLDING = (
+    # Not after a modal: "how long should I hold shares" claims no holding.
+    r"(?<!should )(?<!can )\b(i|we)('m| am|'ve| have| own| bought| hold| holding)\b"
+    r".{0,40}"
+    r"\b(shares?|stocks?|holdings?)\b",
+    r"(?<!should )(?<!can )\b(i|we) (bought|own|hold|am holding)\b",
+    r"\bmy\b.{0,30}\b(shares?|stocks?|holdings?|holding|position)\b",
+    r"\bmere paas\b",
+    # Money rather than a share count: "I have 2 lakh invested in Bajaj Finance".
+    r"(?<!should )(?<!can )\b(i|we)('ve| have| hold| own)?\b.{0,25}"
+    r"\b(invested|worth of|lakhs?|crores?)\b",
+)
+# Never "hold" (it is the ownership verb itself), "book" ("price to book")
+# or a bare "kya" ("PE kya hai"): with those, "I hold TCS, what's the price?"
+# became a holding review instead of a price lookup.
+_HOLDING_ASK = (
+    r"\b(advice|suggest\w*|thoughts?|review|opinion)\b",
+    r"\bwhat (now|next)\b",
+    r"\bwhat (to|should i|do i|shall i) do\b",
+    r"\b(keep|sell|exit|trim)\b",
+    # "hold" only as the question itself ("..., hold?"), never the verb of
+    # owning ("I hold TCS").
+    r"\bhold\s*\?",
+    r"\bbook (my )?profits?\b",
+    r"\b(karu|karun|chahiye)\b",
+)
+
+# Phrasings that are a holding question in the first person but a concept
+# in a definition ("what does buy or sell signal mean"), so they only count
+# when the question is not asking for an explanation.
+_ADVICE_UNLESS_EDUCATION = (
+    r"\b(keep|hold|sell|exit|buy)\b.{0,25}?\bor\b.{0,25}?"
+    r"\b(keep|hold|sell|exit|buy)\b",
+    r"\btime to (buy|sell|exit|book)",
+    r"\bwhat (to|should (i|we)|do (i|we)) do with\b",
+    r"price target",
     r"(bullish|bearish|undervalued|overvalued)",
     r"invest(ment)? advice",
-    r"(good|bad) time to (buy|sell)",
+)
+_EDUCATION = (
+    # Definitions ("what is a price target?"), not "what is TCS's target?".
+    r"^\s*(what('s| is| are) (a|an)\b|what does\b|explain|define|how\b)",
+    r"\b(meaning|mean|means|difference|rating|ratings|signal|strategy|explained)\b",
 )
 
-# A causal question cannot be answered by figures alone: the explanation lives
-# in the filing text, and the figures it explains live in XBRL.
-_CAUSAL = (
-    r"\bwhy\b",
-    r"what (drove|caused|is driving|was driving|drives)",
-    r"(reason|reasons|driver|drivers) (for|behind|of)",
-    r"explain (the |this |that )?(change|decline|drop|increase|growth|move|shift)",
-    r"attributable to",
-    r"account(s|ed)? for the (change|decline|increase|growth)",
-    r"how (do|does|did) .{0,30}(explain|attribute|describe) ",
-)
-
-# Concepts that resolve to an XBRL tag.
-_NUMERIC_CONCEPT = (
-    r"\brevenues?\b",
-    r"\bnet sales\b",
-    r"\bgross (profit|margin)\b",
-    r"\boperating (income|margin|expenses?)\b",
-    r"\bnet income\b",
-    r"\bearnings\b",
-    r"\beps\b",
-    r"\bearnings per share\b",
-    r"\bcost of (revenue|sales|goods)\b",
-    r"\b(r&d|research and development)\b",
-    r"\btotal (assets|liabilities|equity)\b",
-    r"\bstockholders.? equity\b",
-    r"\bcash (and cash equivalents|flow|position)\b",
-    r"\binventor(y|ies)\b",
-    r"\bshares outstanding\b",
-    r"\bdividends?\b",
-    r"\bmargins?\b",
-    r"\bbalance sheet\b",
-    # Deliberately NOT widened with generic "report"/"analyze"/"overview"/
-    # "financials" the way the Indian FUNDAMENTALS path was: tested live,
-    # a broad multi-tag report question routed here reliably produced
-    # 1000x-inflated dollar figures (qwen2.5:7b combining several tags in
-    # one tag IN (...) query and retyping large numbers from memory) across
-    # three rounds of increasingly explicit prompt fixes. The narrative
-    # path's fallback for the same question is safe (verified: a real,
-    # citation-backed MD&A answer, zero fabrication) -- falling through to
-    # it is the correct behavior here, not a gap to close.
-)
-
-# Quantity phrasing without a named concept, e.g. "how much did it spend".
-_QUANTITY = (
-    r"how (much|many)\b",
-    r"what (was|were|is|are) the (total|number|amount|figure)",
-    r"\btrend\b",
-    r"\bgrowth rate\b",
-)
-
-# Period framing, not a quantity ask. "Which risk factors changed year over
-# year" is a narrative question; the phrase modifies whatever is being compared
-# rather than implying a figure, so it only counts alongside a real concept.
-_COMPARISON = (
-    r"over the (last|past) \d+ (quarters?|years?)",
-    r"year[- ]over[- ]year",
-    r"\bcompared (to|with)\b",
-    r"\bversus\b",
-)
-
-# An explicit request to quote what a filing states. "What does Apple's MD&A
-# say about Services revenue" is asking for reported text, not a figure, even
-# though "revenue" also matches a numeric concept below. This framing wins
-# over a bare numeric-concept match; it does not override a genuine causal ask
-# ("why does management say revenue grew"), which still needs both paths.
-_EXPLICIT_QUOTE_FRAME = (
-    r"what does .{0,40}say",
-    r"how does .{0,40}(describe|characterize)",
-    r"what (does|do) .{0,40}(disclose|state)",
-)
-
-# Topics that only filing text covers.
-_NARRATIVE_TOPIC = (
-    r"\brisks?\b",
-    r"\brisk factors?\b",
-    r"management (say|says|said|discuss|discusses|describe|describes|note|notes)",
-    r"what does .{0,30}say",
-    r"\bdisclos(e|es|ed|ure|ures)\b",
-    r"\bcite[sd]?\b",
-    r"\bdescribe[sd]?\b",
-    r"\bmention(s|ed)?\b",
-    r"\bstrateg(y|ies)\b",
-    r"\bcompetiti(on|ve|tors?)\b",
-    r"\blitigation\b",
-    r"\blegal proceedings?\b",
-    r"\bcybersecurity\b",
-    r"\bexport controls?\b",
-    r"\bregulat(ion|ions|ory)\b",
-    r"\bsupply chain\b",
-    r"\bmd&a\b",
-    r"\bguidance\b",
-    r"\boutlook\b",
-    r"\bconcerns?\b",
-    r"\buncertaint(y|ies)\b",
-)
-
-
-# Live-price phrasing for the NSE/BSE realtime-quote path. Distinct from
-# _ADVICE's "price target"/"good buy" framing: this asks what a stock IS
-# trading at right now, not what it SHOULD be worth or whether to act on it.
 _REALTIME_PRICE = (
     r"trading at",
     r"\bcurrent price\b",
     r"\blive price\b",
-    r"\bltp\b",  # NSE/Upstox jargon for last traded price
+    r"\bltp\b",
     r"what('s| is) .{0,30}(price|quote) (right now|currently|today)",
     r"\bprice right now\b",
 )
-
-# Required alongside _REALTIME_PRICE: without an explicit signal that the
-# question is about the NSE/BSE universe, "what's it trading at right now"
-# about Nvidia would misroute here, where there is no NVDA coverage at all.
-# Ticker symbol is the primary signal for all 50; a handful of well-known
-# companies also get a common-name alias. Best-effort, not exhaustive --
-# same coverage tradeoff as every other pattern family in this module. Kept
-# in sync with ingest.instruments_run.DEFAULT_NSE_TICKERS.
-_INDIAN_INSTRUMENT = (
-    r"\breliance\b",
-    r"\bril\b",
-    r"\btcs\b",
-    r"\btata consultancy\b",
-    r"\bhdfc ?bank\b",
-    r"\bicici ?bank\b",
-    r"\binfosys\b",
-    r"\binfy\b",
-    r"\bhindunilvr\b",
-    r"\bhindustan unilever\b",
-    r"\bitc\b",
-    r"\bsbin\b",
-    r"\bstate bank of india\b",
-    r"\bbharti ?airtel\b",
-    r"\bbajfinance\b",
-    r"\bbajaj finance\b",
-    r"\bkotak ?(mahindra)? ?bank\b",
-    r"\blt\b",
-    r"\blarsen ?(and|&) ?toubro\b",
-    r"\bhcltech\b",
-    r"\bhcl technologies\b",
-    r"\baxis ?bank\b",
-    r"\bmaruti\b",
-    r"\bsun pharma\b",
-    r"\basian ?paints\b",
-    r"\btitan\b",
-    r"\bultratech\b",
-    r"\bwipro\b",
-    r"\bnestle ?india\b",
-    r"\badani ?enterprises\b|\badanient\b",
-    r"\badani ?ports\b",
-    r"\btata motors\b|\btmpv\b|\btmcv\b",
-    r"\btata steel\b",
-    r"\bpower ?grid\b",
-    r"\bntpc\b",
-    r"\bm&m\b|\bmahindra ?(and|&) ?mahindra\b",
-    r"\bbajaj finserv\b",
-    r"\bjsw steel\b",
-    r"\btech mahindra\b",
-    r"\bhdfc life\b",
-    r"\bsbi life\b",
-    r"\bgrasim\b",
-    r"\bcipla\b",
-    r"\bdr\.? ?reddy'?s?\b",
-    r"\bbritannia\b",
-    r"\beicher motors\b",
-    r"\bcoal india\b",
-    r"\bdivi'?s? ?lab\b",
-    r"\bapollo hospitals?\b",
-    r"\bhero motocorp\b",
-    r"\bbpcl\b",
-    r"\bongc\b",
-    r"\bshriram finance\b",
-    r"\bindusind ?bank\b",
-    r"\btata consumer\b",
-    r"\bupl\b",
-    r"\bhindalco\b",
-    r"\bbajaj ?auto\b",
-    r"\btrent\b",
-    r"\bjio financial\b|\bjiofin\b",
-    r"\bnse\b",
-    r"\bbse\b",
+# Plain price asks ("TCS share price", "price of reliance"). Skipped for
+# definitions ("what is a stock price?"), which are education.
+_REALTIME_PRICE_ASK = (
+    r"\bshare price\b",
+    r"\bstock price\b",
+    r"\bprice of\b",
 )
 
-# Fundamentals concepts: ratios, financial-statement categories, and
-# screening phrasing. Checked alongside _INDIAN_INSTRUMENT or _NIFTY_SCOPE --
-# a screening question often names no specific company at all ("which Nifty
-# 50 stocks have ROE > 20%"), so the scope gate is wider than REALTIME's.
-_FUNDAMENTALS_CONCEPT = (
+_FUNDAMENTALS = (
     r"\bp/?e\b",
     r"price.to.earnings",
     r"\broe\b",
@@ -247,11 +128,8 @@ _FUNDAMENTALS_CONCEPT = (
     r"ev/ebitda",
     r"\bp/?b\b",
     r"price.to.book",
+    r"book value",
     r"\bfundamentals?\b",
-    r"\bfundamentally\b",
-    # "Compare TCS vs Infosys" names no ratio by itself, but two tracked
-    # tickers plus "compare" has nothing else it could mean here -- there is
-    # no Indian filing-text corpus to compare instead.
     r"\bcompare\b",
     r"\bvs\.?\b",
     r"revenue growth",
@@ -261,131 +139,115 @@ _FUNDAMENTALS_CONCEPT = (
     r"operating profit",
     r"balance sheet",
     r"income statement",
-    # Broad/report-style asks ("give me a report on TCS", "analyze TCS's
-    # financials") name no specific ratio but still belong here -- gated by
-    # _INDIAN_INSTRUMENT/_NIFTY_SCOPE same as everything else in this family,
-    # so this never fires for a US-company question.
     r"\breport\b",
     r"\banalyz(e|ing|is)\b",
-    r"\boverview\b",
     r"\bfinancials?\b",
     r"\bmargins?\b",
     r"\bgrowth\b",
     r"\bleverage\b",
     r"\bdebt\b",
-    # Explicitly-unavailable data points, so the model states the gap itself
-    # (FUNDAMENTALS_SYSTEM_PROMPT's SCOPE section) rather than this falling
-    # through to the SEC narrative path's unrelated "filing does not cover
-    # this" framing.
     r"52.week",
     r"\bvolume\b",
     r"day change",
     r"dividend yield",
-)
-
-_SCREENING = (
     r"\bwhich stocks\b",
     r"\bfind .{0,20}stocks\b",
     r"\bscreen\b",
     r"\bstocks with\b",
 )
 
-_NIFTY_SCOPE = (
-    r"\bnifty\s?50\b",
-    r"\bnifty\b",
+# A definition has no company in it, even if a word happens to match a
+# listed name; "how is X doing" does not, so "how" is left out here.
+_DEFINITION = r"^\s*(what('s| is| are) (a|an)\b|what does\b|explain|define)"
+
+_GENERAL_FINANCE = (
+    r"\bwhat (is|are|does|do|mean|means|meaning of)\b.{0,80}\b"
+    r"(roe|roce|roa|p/?e|p/?b|eps|ebitda|market cap|dividend yield|"
+    r"beta|book value|enterprise value|free cash flow|expense ratio|"
+    r"stock split|bonus share|rights issue|ipo|mutual fund|etf|index fund|"
+    r"bull market|bear market|support|resistance|stop loss|portfolio|"
+    r"diversification|volatility|liquidity|inflation|interest rates?)\b",
+    r"\b(how (does|do|is|are)|explain|define|difference between)\b.{0,80}\b"
+    r"(roe|roce|roa|p/?e|p/?b|eps|ebitda|market cap|dividend yield|"
+    r"stock market|share market|mutual fund|etf|index fund|stock split|"
+    r"bonus share|rights issue|ipo|portfolio|diversification|volatility|"
+    r"liquidity|inflation|interest rates?)\b",
+)
+
+_FOREIGN_MARKETS = (
+    r"\b(nyse|nasdaq|dow jones|s&p ?500|sec filing|10-k|10-q)\b",
+    r"\b(nvidia|nvda|apple|aapl|microsoft|msft|walmart|wmt|costco)\b",
 )
 
 
 def _matches(text: str, patterns: tuple[str, ...]) -> list[str]:
-    return [p for p in patterns if re.search(p, text, re.IGNORECASE)]
+    return [pattern for pattern in patterns if re.search(pattern, text, re.IGNORECASE)]
 
 
-def mentions_tracked_instrument(question: str) -> bool:
-    """Whether a question names one of the NSE tickers this tool tracks.
+def route_question(
+    question: str, *, names_company: bool = False, company_certain: bool = False
+) -> Routing:
+    """Route every question to the Indian-market data or education path.
 
-    Used outside routing too: an ADVICE question about TCS still needs the
-    decline, but the alternatives it offers should be the live-quote path,
-    not SEC-filing offers that do not exist for an Indian equity.
+    names_company says the caller found a listed company in the question. It
+    stands in for the uppercase-symbol heuristic, which misses ordinary
+    "what is the pe of infosys" phrasing, and never overrides a definition.
+    company_certain says the match was not a lone everyday word: only then
+    does a question with no metric at all ("how is hdfc bank doing") count as
+    a company question, so "how is the global economy doing" stays general.
     """
-    return bool(_matches(question, _INDIAN_INSTRUMENT))
-
-
-# How far into the question a quote-frame match may start and still count as
-# framing the *whole* question. "What does Apple's MD&A say about revenue" has
-# it at position 0; "How did margin change and what does management say" has
-# it well past this, joined to an independent numeric clause by "and" -- that
-# is a genuine hybrid, not a quote request that happens to mention a number.
-_QUOTE_FRAME_LEAD_CHARS = 8
-
-
-def _leads_the_question(text: str, patterns: tuple[str, ...]) -> bool:
-    return any(
-        (m := re.search(p, text, re.IGNORECASE))
-        and m.start() <= _QUOTE_FRAME_LEAD_CHARS
-        for p in patterns
-    )
-
-
-def route_question(question: str) -> Routing:
-    """Classify a question, reporting the features that decided it."""
     text = question.strip()
     if not text:
-        return Routing(route=Route.NARRATIVE, reasons=("empty question",))
+        return Routing(Route.GENERAL_FINANCE, ("empty question",))
 
-    if advice := _matches(text, _ADVICE):
-        return Routing(route=Route.ADVICE, reasons=tuple(f"advice:{p}" for p in advice))
-
-    realtime_price = _matches(text, _REALTIME_PRICE)
-    realtime_instrument = _matches(text, _INDIAN_INSTRUMENT)
-    if realtime_price and realtime_instrument:
-        reasons = tuple(f"realtime:{p}" for p in realtime_price) + tuple(
-            f"instrument:{p}" for p in realtime_instrument
+    # Foreign first: a buy/sell question about Apple is still out of scope,
+    # and the advice path only has NSE/BSE data to review it with.
+    foreign = _matches(text, _FOREIGN_MARKETS)
+    if foreign:
+        return Routing(
+            Route.OUT_OF_SCOPE, tuple(f"outside_india:{item}" for item in foreign)
         )
-        return Routing(route=Route.REALTIME, reasons=reasons)
 
-    fundamentals_concept = _matches(text, _FUNDAMENTALS_CONCEPT) or _matches(
-        text, _SCREENING
+    advice = _matches(text, _ADVICE)
+    if not _matches(text, _EDUCATION):
+        if _matches(text, _HOLDING):
+            advice += _matches(text, _HOLDING_ASK)
+        advice += _matches(text, _ADVICE_UNLESS_EDUCATION)
+    if advice:
+        return Routing(Route.ADVICE, tuple(f"advice:{item}" for item in advice))
+
+    realtime = _matches(text, _REALTIME_PRICE)
+    if realtime:
+        return Routing(Route.REALTIME, tuple(f"realtime:{item}" for item in realtime))
+
+    if not _matches(text, _EDUCATION):
+        price_ask = _matches(text, _REALTIME_PRICE_ASK)
+        if price_ask:
+            return Routing(
+                Route.REALTIME, tuple(f"realtime:{item}" for item in price_ask)
+            )
+
+    fundamentals = _matches(text, _FUNDAMENTALS)
+    metric_terms = {"ROE", "ROCE", "ROA", "EPS", "EBITDA", "LTP", "NSE", "BSE"}
+    is_definition = bool(re.search(_DEFINITION, text, re.IGNORECASE))
+    has_company = (names_company and not is_definition) or any(
+        token not in metric_terms for token in re.findall(r"\b[A-Z]{2,}\b", text)
     )
-    fundamentals_scope = realtime_instrument or _matches(text, _NIFTY_SCOPE)
-    if fundamentals_concept and fundamentals_scope:
-        reasons = tuple(f"fundamentals:{p}" for p in fundamentals_concept) + tuple(
-            f"instrument:{p}" for p in fundamentals_scope
+    education = _matches(text, _GENERAL_FINANCE)
+    if fundamentals and (not education or has_company):
+        return Routing(
+            Route.FUNDAMENTALS,
+            tuple(f"fundamentals:{item}" for item in fundamentals),
         )
-        return Routing(route=Route.FUNDAMENTALS, reasons=reasons)
 
-    causal = _matches(text, _CAUSAL)
-    concept = _matches(text, _NUMERIC_CONCEPT)
-    quantity = _matches(text, _QUANTITY)
-    comparison = _matches(text, _COMPARISON)
-    topic = _matches(text, _NARRATIVE_TOPIC)
-    quote_frame = _matches(text, _EXPLICIT_QUOTE_FRAME)
-    numeric = concept + quantity
-    if numeric:
-        numeric = numeric + comparison
+    if education:
+        return Routing(
+            Route.GENERAL_FINANCE,
+            tuple(f"general_finance:{item}" for item in education),
+        )
 
-    # "What does X say about revenue" wants the stated text, not the figure --
-    # a numeric concept incidentally named inside the topic does not make this
-    # a numbers question. This only applies when the quote-frame IS the
-    # question: "how did margin change and what does management say" joins an
-    # independent numeric clause to the frame with "and", and stays hybrid.
-    if quote_frame and not causal and _leads_the_question(text, _EXPLICIT_QUOTE_FRAME):
-        numeric = []
+    if names_company and company_certain and not is_definition:
+        # "how is hdfc bank doing": no metric named, but a company is.
+        return Routing(Route.FUNDAMENTALS, ("fundamentals:company named",))
 
-    reasons = tuple(
-        [f"causal:{p}" for p in causal]
-        + [f"numeric:{p}" for p in numeric]
-        + [f"topic:{p}" for p in topic]
-        + [f"quote_frame:{p}" for p in quote_frame]
-    )
-
-    if numeric and (causal or topic):
-        # Needs the figures and the stated explanation; neither alone answers it.
-        return Routing(route=Route.HYBRID, reasons=reasons)
-    if numeric:
-        return Routing(route=Route.NUMERIC, reasons=reasons)
-    if topic or causal:
-        return Routing(route=Route.NARRATIVE, reasons=reasons)
-
-    # Nothing matched. Filing text covers far more ground than the XBRL tags do,
-    # so an unrecognised question is likelier to be answerable from prose.
-    return Routing(route=Route.NARRATIVE, reasons=("no features matched",))
+    return Routing(Route.GENERAL_FINANCE, ("general Indian-market question",))

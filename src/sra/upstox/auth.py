@@ -7,6 +7,7 @@ rotates daily and .env is meant for stable configuration.
 """
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -76,17 +77,27 @@ def _token_path(cache_dir: Path) -> Path:
 
 
 def _write_token(token: UpstoxToken, cache_dir: Path) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    # 0700 on the directory and a 0600 file that never exists with wider
+    # permissions: it is created by os.open with the mode, written under a
+    # temporary name, then renamed over the old token so a crash cannot leave a
+    # half-written token behind.
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     path = _token_path(cache_dir)
-    path.write_text(
-        json.dumps(
-            {
-                "access_token": token.access_token,
-                "obtained_at": token.obtained_at.isoformat(),
-            }
-        )
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    payload = json.dumps(
+        {
+            "access_token": token.access_token,
+            "obtained_at": token.obtained_at.isoformat(),
+        }
     )
-    path.chmod(0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def current_upstox_token(*, cache_dir: Path | None = None) -> str:
@@ -111,11 +122,25 @@ def current_upstox_token(*, cache_dir: Path | None = None) -> str:
             "(recommended -- valid for a year), or run `sra upstox login` for a "
             "daily access token."
         )
-    data = json.loads(path.read_text())
-    age = datetime.now(UTC) - datetime.fromisoformat(data["obtained_at"])
+    try:
+        data = json.loads(path.read_text())
+        access_token = data["access_token"]
+        obtained_at = datetime.fromisoformat(data["obtained_at"])
+        if not isinstance(access_token, str) or not access_token:
+            raise ValueError("access_token is not a non-empty string")
+        if obtained_at.tzinfo is None:
+            obtained_at = obtained_at.replace(tzinfo=UTC)
+        age = datetime.now(UTC) - obtained_at
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # JSONDecodeError and UnicodeDecodeError are ValueErrors; a hand-edited
+        # or truncated cache must not leak a raw parse error to the caller.
+        raise MissingUpstoxTokenError(
+            f"Upstox token cache {path} is unreadable or corrupt ({exc!r}). "
+            "Run `sra upstox login` again."
+        ) from exc
     if age > PREEMPTIVE_STALE_AFTER:
         raise MissingUpstoxTokenError(
             f"Upstox token is {age.total_seconds() / 3600:.1f}h old and likely expired "
             "(Upstox access tokens last about a day). Run `sra upstox login` again."
         )
-    return str(data["access_token"])
+    return access_token

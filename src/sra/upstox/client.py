@@ -6,12 +6,32 @@ price silently outlive its truth. Rate limiting is still applied so repeated
 questions in a short window do not hammer Upstox's API.
 """
 
+import contextlib
 import time
 from typing import Any
 
 import httpx
 
 from sra.config import settings
+
+# Backoff between attempts is 1s, 2s, 4s, ... but never more than this, and a
+# server's Retry-After is honoured only up to it. With the default 4 attempts the
+# worst case is therefore 3 waits of <= 5s plus 4 requests of <= 10s each, about
+# 55s, instead of blocking a chat turn for as long as a hostile header asks.
+MAX_RETRY_WAIT_SECONDS = 5.0
+
+
+def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    """Seconds to wait before the next attempt, bounded by MAX_RETRY_WAIT_SECONDS."""
+    delay = float(2**attempt)
+    if response is not None:
+        # Only the delta-seconds form; an HTTP-date falls back to backoff.
+        with contextlib.suppress(KeyError, ValueError):
+            delay = float(response.headers["Retry-After"])
+    # A NaN delay would slip past min/max, so treat it as no usable hint.
+    if delay != delay:
+        delay = float(2**attempt)
+    return min(max(delay, 0.0), MAX_RETRY_WAIT_SECONDS)
 
 
 class UpstoxError(RuntimeError):
@@ -63,13 +83,17 @@ class UpstoxClient:
         last_error: Exception | None = None
         for attempt in range(attempts):
             self._throttle()
+            response: httpx.Response | None = None
             try:
                 response = self._client.get(path, params=params)
             except httpx.HTTPError as exc:
                 last_error = exc
             else:
                 if response.status_code == 200:
-                    return response.json()
+                    try:
+                        return response.json()
+                    except ValueError as exc:
+                        raise UpstoxError(f"non-JSON 200 response from {path}") from exc
                 if response.status_code == 401:
                     raise UpstoxAuthError(
                         "Upstox rejected the access token (expired or revoked). "
@@ -82,7 +106,9 @@ class UpstoxClient:
                     raise UpstoxError(
                         f"{response.status_code} from {path}: {response.text[:200]}"
                     )
-            time.sleep(2**attempt)
+            # No wait after the last attempt: there is nothing left to retry.
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(response, attempt))
         raise UpstoxError(
             f"giving up on {path} after {attempts} attempts"
         ) from last_error

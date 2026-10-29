@@ -1,8 +1,13 @@
 from typing import Any
 
+import psycopg
 import pytest
 
-from sra.tools.get_live_quote import get_live_quote
+from sra.tools.get_live_quote import (
+    _log_quote,
+    get_live_quote,
+    resolve_instrument_key,
+)
 from sra.upstox.client import UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
 
@@ -41,12 +46,14 @@ def test_unknown_ticker_returns_error_without_calling_upstox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _raise(_ticker: str) -> tuple[str, str]:
-        raise UnknownInstrumentError("'FAKE' is not a tracked NSE instrument")
+        raise UnknownInstrumentError(
+            "'FAKE' is not in the synced NSE/BSE equity universe"
+        )
 
     monkeypatch.setattr("sra.tools.get_live_quote.resolve_instrument_key", _raise)
     quote = get_live_quote("FAKE")
     assert quote.error is not None
-    assert "not a tracked NSE instrument" in quote.error
+    assert "synced NSE/BSE equity universe" in quote.error
     assert quote.last_price is None
 
 
@@ -64,7 +71,7 @@ def test_upstox_error_is_surfaced_on_the_result(
     assert quote.last_price is None
 
 
-def test_successful_quote_is_parsed_and_never_implies_a_filing_figure(
+def test_successful_quote_is_parsed_and_identified_as_an_nse_bse_quote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -88,4 +95,113 @@ def test_successful_quote_is_parsed_and_never_implies_a_filing_figure(
     assert quote.error is None
     assert quote.last_price == 4123.5
     assert quote.fetched_at
-    assert "SEC filing" in quote.to_text()
+    assert "live NSE/BSE quote" in quote.to_text()
+
+
+_KEY = "NSE_EQ|INE467B01029"
+
+
+def _resolve_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote.resolve_instrument_key",
+        lambda _ticker: (_KEY, "NSE_EQ"),
+    )
+
+
+def test_database_error_while_resolving_becomes_an_error_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _down(_ticker: str) -> tuple[str, str]:
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr("sra.tools.get_live_quote.resolve_instrument_key", _down)
+    client = _FakeClient(payload={})
+    quote = get_live_quote("TCS", client=client)
+    assert quote.error is not None and "connection refused" in quote.error
+    assert quote.last_price is None
+    assert client.calls == []  # never reached Upstox
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": {}},  # halted or unknown instrument
+        {"data": {"NSE_EQ:TCS": {"last_price": 1.0, "instrument_token": "OTHER"}}},
+        {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY}}},  # no price
+        {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY, "last_price": None}}},
+        {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY, "last_price": "n/a"}}},
+        {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY, "last_price": "nan"}}},
+        {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY, "last_price": [1]}}},
+        {"data": {"NSE_EQ:TCS": "not-a-dict"}},
+        {"data": None},
+        {},
+        None,
+        ["unexpected"],
+    ],
+)
+def test_response_without_a_usable_price_is_an_error_not_a_none_price(
+    monkeypatch: pytest.MonkeyPatch, payload: Any
+) -> None:
+    _resolve_ok(monkeypatch)
+    logged: list[Any] = []
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote._log_quote", lambda *a, **_k: logged.append(a)
+    )
+    quote = get_live_quote("TCS", client=_FakeClient(payload=payload))
+    assert quote.error is not None and _KEY in quote.error
+    assert quote.last_price is None
+    assert quote.to_text().startswith("ERROR:")
+    assert logged == []  # no NULL-price audit row
+
+
+def test_numeric_string_price_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    _resolve_ok(monkeypatch)
+    payload = {"data": {"NSE_EQ:TCS": {"instrument_token": _KEY, "last_price": "99.5"}}}
+    quote = get_live_quote("TCS", client=_FakeClient(payload=payload))
+    assert quote.error is None and quote.last_price == 99.5
+
+
+def test_nse_first_resolution_is_kept_when_no_exchange_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Conn:
+        def __enter__(self) -> "_Conn":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            pass
+
+        def execute(self, sql: str, params: Any) -> "_Conn":
+            captured["sql"], captured["params"] = sql, params
+            return self
+
+        def fetchone(self) -> dict[str, str]:
+            return {"instrument_key": _KEY, "exchange": "NSE_EQ"}
+
+    def fake_connect(*, readonly: bool = False) -> _Conn:
+        captured["readonly"] = readonly
+        return _Conn()
+
+    monkeypatch.setattr("sra.tools.get_live_quote.connect", fake_connect)
+    assert resolve_instrument_key("tcs") == (_KEY, "NSE_EQ")
+    assert captured["readonly"] is True
+    assert "exchange = 'NSE_EQ' DESC" in captured["sql"]
+    assert captured["params"] == ("tcs",)
+
+
+def test_audit_write_failure_is_logged_not_raised(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _Failing:
+        def __enter__(self) -> Any:
+            raise psycopg.OperationalError("down")
+
+        def __exit__(self, *_exc: object) -> None:
+            pass
+
+    monkeypatch.setattr("sra.tools.get_live_quote.connect", lambda: _Failing())
+    with caplog.at_level("WARNING", logger="sra.tools.get_live_quote"):
+        _log_quote(_KEY, 1.0, "2026-01-01T00:00:00+00:00")
+    assert "could not log quote" in caplog.text
