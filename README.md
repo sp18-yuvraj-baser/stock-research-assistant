@@ -19,7 +19,7 @@ uv pip install -e ".[dev]"
 sra migrate
 ```
 
-`sra migrate` creates the database if needed and applies the files in `sql/`.
+`sra migrate` creates the database if needed and applies the files in `src/sra/sql/`.
 `SRA_READONLY_DSN` must use the role name `sra_reader`: the SQL files grant to
 that role by name, and `sra migrate` refuses any other user.
 

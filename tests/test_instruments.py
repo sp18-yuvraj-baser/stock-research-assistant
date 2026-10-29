@@ -8,9 +8,12 @@ import pytest
 
 from sra.upstox.client import UpstoxError
 from sra.upstox.instruments import (
+    EquityInstrument,
     UnknownInstrumentError,
     fetch_instrument_master,
     list_indian_equities,
+    lookup_instrument,
+    match_instruments,
     resolve_instruments,
 )
 
@@ -56,8 +59,11 @@ def test_resolve_known_tickers(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **_kwargs: _FIXTURE_RECORDS,
     )
     resolved = resolve_instruments(["TCS", "INFY"])
-    assert resolved["TCS"] == ("NSE_EQ|INE467B01029", "NSE_EQ")
-    assert resolved["INFY"] == ("NSE_EQ|INE009A01021", "NSE_EQ")
+    assert (resolved["TCS"].instrument_key, resolved["TCS"].exchange) == (
+        "NSE_EQ|INE467B01029",
+        "NSE_EQ",
+    )
+    assert resolved["INFY"].instrument_key == "NSE_EQ|INE009A01021"
 
 
 def test_unknown_ticker_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,10 +80,8 @@ def test_resolve_bse_equity_series(monkeypatch: pytest.MonkeyPatch) -> None:
         "sra.upstox.instruments.fetch_instrument_master",
         lambda **_kwargs: _FIXTURE_RECORDS,
     )
-    assert resolve_instruments(["TCS"], segment="BSE_EQ")["TCS"] == (
-        "BSE_EQ|INE467B01029",
-        "BSE_EQ",
-    )
+    tcs = resolve_instruments(["TCS"], segment="BSE_EQ")["TCS"]
+    assert (tcs.instrument_key, tcs.exchange) == ("BSE_EQ|INE467B01029", "BSE_EQ")
 
 
 def test_list_indian_equities_keeps_nse_and_bse_cash_equities(
@@ -170,3 +174,87 @@ def test_fresh_cache_is_reused_without_a_download(
 
     monkeypatch.setattr("sra.upstox.instruments.httpx.get", _no_network)
     assert fetch_instrument_master(cache_dir=tmp_path) == _FIXTURE_RECORDS
+
+
+class _Conn:
+    """Records the one query a lookup runs and returns canned rows."""
+
+    def __init__(self, rows: list[dict[str, str]]) -> None:
+        self.rows = rows
+        self.sql = ""
+        self.params: dict[str, Any] = {}
+
+    def __enter__(self) -> "_Conn":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        pass
+
+    def execute(self, sql: str, params: dict[str, Any]) -> "_Conn":
+        self.sql, self.params = sql, params
+        return self
+
+    def fetchone(self) -> dict[str, str] | None:
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list[dict[str, str]]:
+        return self.rows
+
+
+def _use(monkeypatch: pytest.MonkeyPatch, conn: _Conn) -> list[bool]:
+    """Route instruments.connect to conn; returns each call's readonly flag."""
+    modes: list[bool] = []
+
+    def fake_connect(*, readonly: bool = False) -> _Conn:
+        modes.append(readonly)
+        return conn
+
+    monkeypatch.setattr("sra.upstox.instruments.connect", fake_connect)
+    return modes
+
+
+_ROW = {
+    "ticker": "TCS",
+    "instrument_key": "NSE_EQ|INE467B01029",
+    "exchange": "NSE_EQ",
+    "name": "TATA CONSULTANCY SERV LT",
+}
+
+
+def test_lookup_prefers_nse_and_reads_as_the_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _Conn([_ROW])
+    readonly = _use(monkeypatch, conn)
+    assert lookup_instrument("tcs") == EquityInstrument(
+        "TCS", "NSE_EQ|INE467B01029", "NSE_EQ", "TATA CONSULTANCY SERV LT"
+    )
+    assert readonly == [True]
+    assert "exchange = 'NSE_EQ' DESC" in conn.sql
+    assert conn.params == {"ticker": "tcs", "segment": None}
+
+
+def test_lookup_with_an_exchange_pins_the_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _Conn([{**_ROW, "exchange": "BSE_EQ"}])
+    _use(monkeypatch, conn)
+    lookup_instrument("TCS", exchange="bse")
+    assert conn.params["segment"] == "BSE_EQ"
+
+
+def test_lookup_of_an_unsynced_symbol_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use(monkeypatch, _Conn([]))
+    with pytest.raises(UnknownInstrumentError, match="FAKE"):
+        lookup_instrument("FAKE")
+
+
+def test_match_returns_one_preferred_listing_per_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _Conn([_ROW])
+    _use(monkeypatch, conn)
+    found = match_instruments(tickers=["TCS"], names=[], prefixes=["TATA %"])
+    assert [f.ticker for f in found] == ["TCS"]
+    assert "DISTINCT ON (m.ticker)" in conn.sql
+    assert conn.params["prefixes"] == ["TATA %"]

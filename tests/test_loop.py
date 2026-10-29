@@ -28,20 +28,14 @@ def _client(handler: Handler) -> httpx.Client:
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch, handler: Handler) -> list[dict[str, Any]]:
-    """Point run_path's own client at a fake server; returns the request bodies."""
+    """Point the shared Ollama client at a fake server; returns request bodies."""
     bodies: list[dict[str, Any]] = []
-    real_client = httpx.Client
 
     def recording(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
         return handler(request)
 
-    def factory(**kwargs: Any) -> httpx.Client:
-        return real_client(
-            base_url=kwargs["base_url"], transport=httpx.MockTransport(recording)
-        )
-
-    monkeypatch.setattr(httpx, "Client", factory)
+    monkeypatch.setattr(loop, "ollama_client", lambda: _client(recording))
     return bodies
 
 
@@ -311,3 +305,11 @@ def test_fundamentals_prompt_orders_periods_by_period_end() -> None:
     assert "ORDER BY curr.period DESC" not in prompt
     for stale in ("FY2025", "Q2FY26", "Nifty", "46 of the 52", "6 tracked"):
         assert stale not in prompt
+
+
+def test_every_model_call_shares_one_client() -> None:
+    loop.ollama_client.cache_clear()
+    try:
+        assert loop.ollama_client() is loop.ollama_client()
+    finally:
+        loop.ollama_client.cache_clear()

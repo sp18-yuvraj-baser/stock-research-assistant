@@ -1,5 +1,7 @@
+import logging
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,6 +33,7 @@ class Settings(BaseSettings):
 
     cache_dir: Path = Field(default=PROJECT_ROOT / ".cache")
     sql_row_limit: int = 200
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # Upstox (NSE/BSE live quotes). All optional with safe defaults so an
     # existing .env with no Upstox creds leaves every other command unchanged.
@@ -49,3 +52,11 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def configure_logging() -> None:
+    """Set up root logging once, for the CLI and the dashboard alike."""
+    logging.basicConfig(
+        level=settings().log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )

@@ -4,9 +4,10 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-from sra.config import PROJECT_ROOT, settings
+from sra.config import settings
 
-SQL_DIR = PROJECT_ROOT / "sql"
+# Inside the package, so an installed `sra` can migrate without a checkout.
+SQL_DIR = Path(__file__).with_name("sql")
 
 # The sql/ files grant to and revoke from this role by name.
 READER_ROLE = "sra_reader"

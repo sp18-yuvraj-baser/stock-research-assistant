@@ -2,12 +2,14 @@ import time
 from decimal import Decimal
 from typing import Any
 
+import psycopg
 import pytest
 
 from sra.agent import holding
 from sra.agent.holding import DISCLAIMER, NO_COMPANY, Position, parse_position
 from sra.tools.get_live_quote import LiveQuote
 from sra.tools.run_sql import SqlResult
+from sra.upstox.instruments import EquityInstrument
 
 INSTRUMENTS = [
     {"ticker": "HDFCBANK", "name": "HDFC BANK LTD"},
@@ -47,19 +49,22 @@ class FakeData:
         self.errors: dict[str, str] = {}
         self.quotes: list[str] = []
 
+    def match_instruments(
+        self, *, tickers: list[str], names: list[str], prefixes: list[str]
+    ) -> list[EquityInstrument]:
+        if "instruments" in self.errors:
+            raise psycopg.OperationalError(self.errors["instruments"])
+        return [
+            EquityInstrument(r["ticker"], f"NSE_EQ|{r['ticker']}", "NSE_EQ", r["name"])
+            for r in INSTRUMENTS
+            if r["ticker"] in tickers
+            or r["name"] in names
+            or any(r["name"].startswith(p[:-1]) for p in prefixes)
+        ]
+
     def run_sql(self, sql: str, params: dict[str, Any] | None = None) -> SqlResult:
         assert params is not None
-        if "FROM instruments" in sql:
-            if "instruments" in self.errors:
-                return SqlResult(sql=sql, error=self.errors["instruments"])
-            rows = [
-                r
-                for r in INSTRUMENTS
-                if r["ticker"] in params["tickers"]
-                or r["name"] in params["names"]
-                or any(r["name"].startswith(p[:-1]) for p in params["prefixes"])
-            ]
-        elif "fundamental_ratios" in sql:
+        if "fundamental_ratios" in sql:
             if "ratios" in self.errors:
                 return SqlResult(sql=sql, error=self.errors["ratios"])
             stamp = "2026-10-22T09:36:00+00:00"
@@ -81,6 +86,7 @@ class FakeData:
 def data(monkeypatch: pytest.MonkeyPatch) -> FakeData:
     fake = FakeData()
     monkeypatch.setattr(holding, "run_sql", fake.run_sql)
+    monkeypatch.setattr(holding, "match_instruments", fake.match_instruments)
     monkeypatch.setattr(holding, "get_live_quote", fake.get_live_quote)
     return fake
 
@@ -140,7 +146,7 @@ def test_review_renders_every_section_with_computed_figures(data: FakeData) -> N
     ).text
 
     assert text.startswith("HDFC BANK LTD (HDFCBANK): review")
-    assert data.quotes == ["HDFCBANK:NSE"]
+    assert data.quotes == ["HDFCBANK:NSE_EQ"]
     assert "Live price: ₹682.50 (NSE, 29 Oct 2026, 12:32 IST)" in text
     assert "Your 100 shares: ₹68,250.00" in text
     assert "unrealised gain ₹8,250.00 (+13.75%)" in text
@@ -323,3 +329,10 @@ def test_a_lone_lowercase_word_is_not_confident(data: FakeData) -> None:
     found = holding.resolve_companies("How is the global economy doing?")
     assert [c.ticker for c in found.companies] == ["GLOBAL"]
     assert not found.confident
+
+
+def test_a_buy_price_comes_with_the_bonus_and_split_caveat(data: FakeData) -> None:
+    with_price = holding.review("I have 100 HDFCBANK shares bought at 1500, sell?")
+    assert "bonus issue or stock split" in with_price.text
+    without = holding.review("I have 100 HDFCBANK shares, sell?")
+    assert "bonus issue" not in without.text

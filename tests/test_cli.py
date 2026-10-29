@@ -176,12 +176,16 @@ def test_ingest_instruments_all_reports_skipped_conflicts(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from sra.ingest.instruments_run import InstrumentSyncResult, SkippedInstrument
+    from sra.upstox.instruments import EquityInstrument
 
+    synced = [
+        EquityInstrument(f"T{i}", f"NSE_EQ|{i}", "NSE_EQ", "X") for i in range(10)
+    ]
     monkeypatch.setattr(
         cli,
         "ingest_all_indian_equities",
         lambda **_k: InstrumentSyncResult(
-            10, [SkippedInstrument("TMPV", "NSE_EQ", "NSE_EQ|INE155A01022")]
+            synced, [SkippedInstrument("TMPV", "NSE_EQ", "NSE_EQ|INE155A01022")]
         ),
     )
     assert cli.main(["upstox", "ingest-instruments", "--all"]) == 0

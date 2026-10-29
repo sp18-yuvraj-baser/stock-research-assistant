@@ -4,9 +4,10 @@ import pytest
 
 from sra.agent import compose, holding
 from sra.agent.compose import OUT_OF_SCOPE, ask
-from sra.agent.holding import Company, Resolution
+from sra.agent.holding import Resolution
 from sra.agent.loop import PathResult
 from sra.agent.router import Route
+from sra.upstox.instruments import EquityInstrument
 
 
 def test_holding_question_gets_the_code_rendered_review(
@@ -51,7 +52,9 @@ def _stub_paths(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return ran
 
 
-def _resolves(monkeypatch: pytest.MonkeyPatch, *companies: Company) -> list[str]:
+def _resolves(
+    monkeypatch: pytest.MonkeyPatch, *companies: EquityInstrument
+) -> list[str]:
     looked_up: list[str] = []
 
     def fake(question: str) -> Resolution:
@@ -66,7 +69,10 @@ def test_company_named_in_plain_words_gets_the_fundamentals_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ran = _stub_paths(monkeypatch)
-    _resolves(monkeypatch, Company("INFY", "INFOSYS LTD"))
+    _resolves(
+        monkeypatch,
+        EquityInstrument("INFY", "NSE_EQ|INE009A01021", "NSE_EQ", "INFOSYS LTD"),
+    )
     answer = ask("what is the pe of infosys")
     assert answer.route is Route.FUNDAMENTALS
     assert ran == ["fundamentals"]
@@ -86,7 +92,9 @@ def test_no_lookup_when_the_regexes_already_route_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ran = _stub_paths(monkeypatch)
-    looked_up = _resolves(monkeypatch, Company("TCS", "TCS LTD"))
+    looked_up = _resolves(
+        monkeypatch, EquityInstrument("TCS", "NSE_EQ|INE467B01029", "NSE_EQ", "TCS LTD")
+    )
     assert ask("What is HDFC Bank's P/E ratio?").route is Route.FUNDAMENTALS
     assert ask("TCS share price").route is Route.REALTIME
     assert looked_up == []

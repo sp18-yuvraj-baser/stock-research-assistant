@@ -9,6 +9,7 @@ reported, never returned as an empty answer.
 import json
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 import httpx
@@ -27,6 +28,9 @@ from sra.tools.run_sql import SqlResult, run_sql
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 6
+
+# A tool round on a local model can take minutes; a one-line rewrite cannot.
+ANSWER_TIMEOUT_SECONDS = 600.0
 
 # A model that reissues a query it already ran is stuck rather than working;
 # without this it burns every remaining round on the same call and returns
@@ -56,16 +60,27 @@ class ModelUnavailableError(OllamaError):
 NO_ANSWER = "The model returned no answer. Try asking again or rephrasing the question."
 
 
+@lru_cache(maxsize=1)
+def ollama_client() -> httpx.Client:
+    """The process's one Ollama client, so every model call reuses its pooled
+    keep-alive connection instead of opening a new one per question. httpx
+    clients are thread-safe, so concurrent dashboard requests can share it."""
+    return httpx.Client(
+        base_url=settings().ollama_url, timeout=httpx.Timeout(ANSWER_TIMEOUT_SECONDS)
+    )
+
+
 def chat(
     client: httpx.Client,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     *,
     think: bool | None = None,
+    timeout: float = ANSWER_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """One /api/chat call; every failure surfaces as an OllamaError subclass."""
     try:
-        response = _post_chat(client, messages, tools, think=think)
+        response = _post_chat(client, messages, tools, think=think, timeout=timeout)
     except httpx.ConnectError as exc:
         raise ModelUnavailableError(
             f"cannot reach the model server at {settings().ollama_url}. "
@@ -107,12 +122,14 @@ def _post_chat(
     tools: list[dict[str, Any]],
     *,
     think: bool | None = None,
+    timeout: float = ANSWER_TIMEOUT_SECONDS,
 ) -> httpx.Response:
     # None leaves the model's own default; a thinking model asked for a
     # one-line rewrite otherwise spends most of its time reasoning about it.
     extra = {} if think is None else {"think": think}
     return client.post(
         "/api/chat",
+        timeout=timeout,
         json={
             "model": settings().generation_model,
             "messages": messages,
@@ -198,65 +215,62 @@ def run_path(
     allowed = frozenset(str(tool["function"]["name"]) for tool in tools)
     retried = False
 
-    with httpx.Client(
-        base_url=settings().ollama_url, timeout=httpx.Timeout(600.0)
-    ) as client:
-        for round_index in range(max_rounds):
-            payload = chat(client, messages, tools)
+    client = ollama_client()
+    for round_index in range(max_rounds):
+        payload = chat(client, messages, tools)
+        message = payload.get("message", {})
+        tool_calls = message.get("tool_calls") or []
+        result.rounds = round_index + 1
+
+        if not tool_calls and not _usable(payload) and not retried:
+            # A thinking model can spend the whole output budget reasoning
+            # and emit no answer; asking again without thinking usually
+            # fits. Once per question, so a broken model cannot loop.
+            retried = True
+            logger.warning(
+                "blank or truncated answer (done_reason=%s); retrying without thinking",
+                payload.get("done_reason"),
+            )
+            payload = chat(client, messages, tools, think=False)
             message = payload.get("message", {})
             tool_calls = message.get("tool_calls") or []
-            result.rounds = round_index + 1
 
-            if not tool_calls and not _usable(payload) and not retried:
-                # A thinking model can spend the whole output budget reasoning
-                # and emit no answer; asking again without thinking usually
-                # fits. Once per question, so a broken model cannot loop.
-                retried = True
+        if not tool_calls:
+            if not _usable(payload):
                 logger.warning(
-                    "blank or truncated answer (done_reason=%s); retrying "
-                    "without thinking",
+                    "no usable answer after retry (done_reason=%s)",
                     payload.get("done_reason"),
                 )
-                payload = chat(client, messages, tools, think=False)
-                message = payload.get("message", {})
-                tool_calls = message.get("tool_calls") or []
-
-            if not tool_calls:
-                if not _usable(payload):
-                    logger.warning(
-                        "no usable answer after retry (done_reason=%s)",
-                        payload.get("done_reason"),
-                    )
-                    result.stopped_early = True
-                    result.text = NO_ANSWER
-                    return result
-                result.text = (message.get("content") or "").strip()
+                result.stopped_early = True
+                result.text = NO_ANSWER
                 return result
+            result.text = (message.get("content") or "").strip()
+            return result
 
-            # Keep the assistant turn verbatim so the model sees its own calls.
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.get("content") or "",
-                    "tool_calls": tool_calls,
-                }
-            )
-            for call in tool_calls:
-                name = str(call.get("function", {}).get("name") or "")
-                arguments = _tool_arguments(call)
-                fingerprint = f"{name}:{json.dumps(arguments, sort_keys=True)}"
-                seen_calls[fingerprint] = seen_calls.get(fingerprint, 0) + 1
-                if seen_calls[fingerprint] > MAX_REPEATED_CALLS:
-                    content = (
-                        "ERROR: this exact call was already made and returned the "
-                        "same rows. Either answer from the results you have, or "
-                        "state what is missing. Do not repeat it."
-                    )
-                else:
-                    content = _dispatch(name, arguments, result, allowed)
-                messages.append(
-                    {"role": "tool", "tool_name": name or "unknown", "content": content}
+        # Keep the assistant turn verbatim so the model sees its own calls.
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.get("content") or "",
+                "tool_calls": tool_calls,
+            }
+        )
+        for call in tool_calls:
+            name = str(call.get("function", {}).get("name") or "")
+            arguments = _tool_arguments(call)
+            fingerprint = f"{name}:{json.dumps(arguments, sort_keys=True)}"
+            seen_calls[fingerprint] = seen_calls.get(fingerprint, 0) + 1
+            if seen_calls[fingerprint] > MAX_REPEATED_CALLS:
+                content = (
+                    "ERROR: this exact call was already made and returned the "
+                    "same rows. Either answer from the results you have, or "
+                    "state what is missing. Do not repeat it."
                 )
+            else:
+                content = _dispatch(name, arguments, result, allowed)
+            messages.append(
+                {"role": "tool", "tool_name": name or "unknown", "content": content}
+            )
 
     result.stopped_early = True
     result.text = f"Stopped after {max_rounds} tool rounds without an answer."

@@ -1,5 +1,6 @@
 """Ingest NSE/BSE fundamental research from Upstox's Fundamentals API."""
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -9,6 +10,13 @@ from typing import Any
 from sra.db import connect
 from sra.upstox.client import UpstoxAuthError, UpstoxClient, UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
+
+log = logging.getLogger(__name__)
+
+# In a full-universe run, this many failures in a row means Upstox or the
+# network is down, not that these listings are bad: stop instead of spending
+# the next hour failing every remaining listing. Completed work is saved.
+MAX_CONSECUTIVE_FAILURES = 20
 
 UPSERT_RATIO = """
 INSERT INTO fundamental_ratios
@@ -237,10 +245,24 @@ def ingest_fundamentals(
     reports: list[FundamentalsIngestReport] = []
     total = len(requested)
 
+    consecutive_failures = 0
+
     def record(position: int, report: FundamentalsIngestReport) -> None:
+        nonlocal consecutive_failures
         reports.append(report)
+        if report.error:
+            log.warning("fundamentals for %s failed: %s", report.ticker, report.error)
+            consecutive_failures += 1
+        elif not report.skipped:
+            consecutive_failures = 0
         if on_progress:
             on_progress(position, total, report)
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            raise UpstoxError(
+                f"stopped after {consecutive_failures} listings failed in a row "
+                f"(last: {report.ticker}: {report.error}). Completed listings "
+                "were saved; re-run the same command to resume."
+            )
 
     with UpstoxClient() as client:
         for position, ticker in enumerate(requested, start=1):
@@ -317,4 +339,7 @@ def ingest_fundamentals(
                 position,
                 FundamentalsIngestReport(ticker, len(ratio_rows), len(financial_rows)),
             )
+    saved = sum(1 for r in reports if not r.error and not r.skipped)
+    failed = sum(1 for r in reports if r.error)
+    log.info("fundamentals: %d saved, %d failed of %d", saved, failed, total)
     return reports

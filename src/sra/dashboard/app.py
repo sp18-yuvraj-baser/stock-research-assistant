@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sra.agent.compose import Answer, ask
 from sra.agent.followup import Turn
 from sra.agent.loop import OllamaError
-from sra.config import settings
+from sra.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +217,5 @@ def run(*, host: str, port: int) -> None:
     # adds nothing beyond loopback.
     name = host.strip().strip("[]").lower()
     app.state.extra_hosts = frozenset() if name in WILDCARD_HOSTS else frozenset({name})
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    configure_logging()
     uvicorn.run("sra.dashboard.app:app", host=host, port=port, reload=False)

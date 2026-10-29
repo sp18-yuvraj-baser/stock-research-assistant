@@ -3,13 +3,12 @@ from typing import Any
 import psycopg
 import pytest
 
-from sra.tools.get_live_quote import (
-    _log_quote,
-    get_live_quote,
-    resolve_instrument_key,
-)
+from sra.tools.get_live_quote import _log_quote, get_live_quote
 from sra.upstox.client import UpstoxError
-from sra.upstox.instruments import UnknownInstrumentError
+from sra.upstox.instruments import EquityInstrument, UnknownInstrumentError
+
+_KEY = "NSE_EQ|INE467B01029"
+_TCS = EquityInstrument("TCS", _KEY, "NSE_EQ", "TATA CONSULTANCY SERV LT")
 
 
 class _FakeClient:
@@ -45,12 +44,12 @@ def _no_db_writes(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unknown_ticker_returns_error_without_calling_upstox(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _raise(_ticker: str) -> tuple[str, str]:
+    def _raise(_ticker: str, **_: object) -> EquityInstrument:
         raise UnknownInstrumentError(
             "'FAKE' is not in the synced NSE/BSE equity universe"
         )
 
-    monkeypatch.setattr("sra.tools.get_live_quote.resolve_instrument_key", _raise)
+    monkeypatch.setattr("sra.tools.get_live_quote.lookup_instrument", _raise)
     quote = get_live_quote("FAKE")
     assert quote.error is not None
     assert "synced NSE/BSE equity universe" in quote.error
@@ -61,8 +60,8 @@ def test_upstox_error_is_surfaced_on_the_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "sra.tools.get_live_quote.resolve_instrument_key",
-        lambda _ticker: ("NSE_EQ|INE467B01029", "NSE_EQ"),
+        "sra.tools.get_live_quote.lookup_instrument",
+        lambda _ticker, **_: _TCS,
     )
     client = _FakeClient(error=UpstoxError("Upstox rejected the access token"))
     quote = get_live_quote("TCS", client=client)
@@ -75,8 +74,8 @@ def test_successful_quote_is_parsed_and_identified_as_an_nse_bse_quote(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "sra.tools.get_live_quote.resolve_instrument_key",
-        lambda _ticker: ("NSE_EQ|INE467B01029", "NSE_EQ"),
+        "sra.tools.get_live_quote.lookup_instrument",
+        lambda _ticker, **_: _TCS,
     )
     client = _FakeClient(
         payload={
@@ -98,23 +97,20 @@ def test_successful_quote_is_parsed_and_identified_as_an_nse_bse_quote(
     assert "live NSE/BSE quote" in quote.to_text()
 
 
-_KEY = "NSE_EQ|INE467B01029"
-
-
 def _resolve_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "sra.tools.get_live_quote.resolve_instrument_key",
-        lambda _ticker: (_KEY, "NSE_EQ"),
+        "sra.tools.get_live_quote.lookup_instrument",
+        lambda _ticker, **_: _TCS,
     )
 
 
 def test_database_error_while_resolving_becomes_an_error_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _down(_ticker: str) -> tuple[str, str]:
+    def _down(_ticker: str, **_: object) -> EquityInstrument:
         raise psycopg.OperationalError("connection refused")
 
-    monkeypatch.setattr("sra.tools.get_live_quote.resolve_instrument_key", _down)
+    monkeypatch.setattr("sra.tools.get_live_quote.lookup_instrument", _down)
     client = _FakeClient(payload={})
     quote = get_live_quote("TCS", client=client)
     assert quote.error is not None and "connection refused" in quote.error
@@ -161,36 +157,6 @@ def test_numeric_string_price_is_accepted(monkeypatch: pytest.MonkeyPatch) -> No
     assert quote.error is None and quote.last_price == 99.5
 
 
-def test_nse_first_resolution_is_kept_when_no_exchange_is_given(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    class _Conn:
-        def __enter__(self) -> "_Conn":
-            return self
-
-        def __exit__(self, *_exc: object) -> None:
-            pass
-
-        def execute(self, sql: str, params: Any) -> "_Conn":
-            captured["sql"], captured["params"] = sql, params
-            return self
-
-        def fetchone(self) -> dict[str, str]:
-            return {"instrument_key": _KEY, "exchange": "NSE_EQ"}
-
-    def fake_connect(*, readonly: bool = False) -> _Conn:
-        captured["readonly"] = readonly
-        return _Conn()
-
-    monkeypatch.setattr("sra.tools.get_live_quote.connect", fake_connect)
-    assert resolve_instrument_key("tcs") == (_KEY, "NSE_EQ")
-    assert captured["readonly"] is True
-    assert "exchange = 'NSE_EQ' DESC" in captured["sql"]
-    assert captured["params"] == ("tcs",)
-
-
 def test_audit_write_failure_is_logged_not_raised(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -205,3 +171,33 @@ def test_audit_write_failure_is_logged_not_raised(
     with caplog.at_level("WARNING", logger="sra.tools.get_live_quote"):
         _log_quote(_KEY, 1.0, "2026-01-01T00:00:00+00:00")
     assert "could not log quote" in caplog.text
+
+
+def test_an_auth_failure_rebuilds_the_shared_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sra.upstox.client import UpstoxAuthError
+
+    resets: list[bool] = []
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote.lookup_instrument", lambda _t, **_: _TCS
+    )
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote.shared_client",
+        lambda: _FakeClient(error=UpstoxAuthError("token expired")),
+    )
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote.reset_shared_client", lambda: resets.append(True)
+    )
+    quote = get_live_quote("TCS")
+    assert quote.error == "token expired"
+    assert resets == [True]
+
+
+def test_quote_text_gives_the_time_in_ist() -> None:
+    from sra.tools.get_live_quote import LiveQuote
+
+    quote = LiveQuote("TCS", _KEY, "NSE_EQ", 2475.2, "2026-10-29T08:09:32+00:00")
+    text = quote.to_text()
+    assert "TCS (NSE): last price 2475.2 INR at 29 Oct 2026, 13:39 IST" in text
+    assert "+00:00" not in text and "UTC" not in text

@@ -158,3 +158,45 @@ def test_network_errors_are_retried_then_reported(sleeps: list[float]) -> None:
     ):
         c.get_json("/x", params={}, attempts=2)
     assert sleeps == [1.0]
+
+
+def test_shared_client_is_reused_until_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sra.upstox import client as client_module
+
+    made: list[UpstoxClient] = []
+
+    class _Recording(UpstoxClient):
+        def __init__(self) -> None:
+            super().__init__(token="t")
+            made.append(self)
+
+    monkeypatch.setattr(client_module, "UpstoxClient", _Recording)
+    client_module.reset_shared_client()
+    first = client_module.shared_client()
+    assert client_module.shared_client() is first
+    client_module.reset_shared_client()
+    assert client_module.shared_client() is not first
+    assert len(made) == 2
+    client_module.reset_shared_client()
+
+
+def test_throttle_spaces_requests_from_any_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("sra.upstox.client.time.sleep", sleeps.append)
+    client = UpstoxClient(
+        token="t", transport=_transport(200, {"status": "success", "data": {}})
+    )
+    threads = [
+        threading.Thread(target=client.get_json, args=("/x",), kwargs={"params": {}})
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    # One shared limiter: every request after the first waited its turn.
+    assert len(sleeps) == 2
