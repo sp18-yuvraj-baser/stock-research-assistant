@@ -1,53 +1,107 @@
 import argparse
 import sys
-import time
+
+import psycopg
+from pydantic import ValidationError
 
 from sra.agent.compose import ask
 from sra.agent.loop import OllamaError
-from sra.eval.harness import (
-    StaleResultsError,
-    format_scoreboard,
-    load_results,
-    run_eval,
-)
-from sra.ingest.narrative_run import index_narrative
-from sra.ingest.run import DEFAULT_TICKERS, ingest_tickers
+from sra.config import configure_logging, settings
+from sra.ingest.fundamentals_run import FundamentalsIngestReport, ingest_fundamentals
+from sra.ingest.instruments_run import ingest_all_indian_equities, ingest_instruments
 from sra.migrate import apply_migrations
-from sra.narrative.embeddings import EmbeddingError
+from sra.upstox.auth import authorize_url, exchange_code
+from sra.upstox.client import UpstoxError
+from sra.upstox.instruments import UnknownInstrumentError
+
+
+class UsageError(Exception):
+    """A bad or missing argument, reported as one line without a traceback."""
 
 
 def _cmd_migrate(_args: argparse.Namespace) -> int:
-    for name in apply_migrations():
+    try:
+        applied = apply_migrations()
+    except ValueError as exc:
+        # Raised for unusable DSNs (no database name, reader DSN without a
+        # password): configuration the user can fix.
+        raise UsageError(str(exc)) from exc
+    for name in applied:
         print(f"applied {name}")
+    if not applied:
+        print("up to date")
     return 0
 
 
-def _cmd_ingest(args: argparse.Namespace) -> int:
-    reports = ingest_tickers(args.tickers or None, refresh=args.refresh)
+def _cmd_upstox_login(_args: argparse.Namespace) -> int:
+    cfg = settings()
+    url = authorize_url(
+        api_key=cfg.upstox_api_key, redirect_uri=cfg.upstox_redirect_uri
+    )
+    print(f"Open this URL, log in, and approve access:\n\n  {url}\n")
+    print("Your browser will redirect with a `code` query parameter. Paste it here:")
+    token = exchange_code(input("code: ").strip())
     print(
-        f"{'ticker':<8}{'cik':<12}{'filings':>9}{'facts':>10}"
-        f"{'skipped':>9}{'stubs':>8}{'labelled':>10}"
+        f"Saved. Obtained at {token.obtained_at.isoformat()}; "
+        "re-run `sra upstox login` daily (Upstox tokens expire each day)."
     )
-    for r in reports:
+    return 0
+
+
+def _cmd_upstox_ingest_instruments(args: argparse.Namespace) -> int:
+    if args.all and args.tickers:
+        raise UsageError("give either tickers or --all, not both")
+    if not args.all and not args.tickers:
+        raise UsageError("give one or more tickers, or --all")
+    result = (
+        ingest_all_indian_equities(refresh=args.refresh)
+        if args.all
+        else ingest_instruments(args.tickers, refresh=args.refresh)
+    )
+    if args.all:
+        print(f"synced {len(result.synced)} NSE/BSE cash-equity listings")
+    else:
+        for equity in result.synced:
+            print(f"{equity.ticker:<10}{equity.exchange:<10}{equity.instrument_key}")
+    if result.skipped:
+        names = ", ".join(f"{s.ticker} ({s.exchange})" for s in result.skipped)
         print(
-            f"{r.ticker:<8}{r.cik:<12}{r.filings:>9}{r.facts_staged:>10}"
-            f"{r.facts_skipped:>9}{r.stub_filings:>8}{r.fiscal_labels:>10}"
+            f"skipped {len(result.skipped)} listing(s) whose ticker is already "
+            f"stored under a different instrument key: {names}",
+            file=sys.stderr,
         )
     return 0
 
 
-def _cmd_index(args: argparse.Namespace) -> int:
-    reports = index_narrative(
-        args.tickers or None, annual=args.annual, quarterly=args.quarterly
+def _cmd_upstox_ingest_fundamentals(args: argparse.Namespace) -> int:
+    if args.all and args.tickers:
+        raise UsageError("give either tickers or --all, not both")
+    if not args.all and not args.tickers:
+        raise UsageError("give one or more tickers, or --all")
+
+    def show_progress(current: int, total: int, item: FundamentalsIngestReport) -> None:
+        # The report is intentionally formatted via its known fields here so
+        # long full-universe jobs remain observable without a noisy line for
+        # every successfully resumed listing.
+        if item.error or current == total or current % 25 == 0:
+            status = "failed" if item.error else "saved"
+            print(f"[{current}/{total}] {item.ticker}: {status}", file=sys.stderr)
+
+    reports = ingest_fundamentals(
+        args.tickers,
+        all_equities=args.all,
+        resume=args.all,
+        on_progress=show_progress if args.all else None,
     )
-    print(f"{'ticker':<8}{'form':<7}{'accession':<24}{'sections':>9}{'chunks':>8}")
-    for r in reports:
-        print(
-            f"{r.ticker:<8}{r.form_type:<7}{r.accession_no:<24}"
-            f"{r.sections:>9}{r.chunks:>8}"
-        )
-    print(f"\ntotal chunks: {sum(r.chunks for r in reports)}")
-    return 0
+    saved = sum(not r.skipped and not r.error for r in reports)
+    skipped = sum(r.skipped for r in reports)
+    failed = [r for r in reports if r.error]
+    print(
+        f"fundamentals: {saved} saved, {skipped} already current, {len(failed)} failed"
+    )
+    for report in failed:
+        print(f"{report.ticker}: {report.error}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def _cmd_ask(args: argparse.Namespace) -> int:
@@ -60,38 +114,24 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         for path in answer.paths:
             for i, call in enumerate(path.sql_calls, start=1):
                 print(f"--- query {i} ---\n{call.sql}\n{call.to_text()}\n")
-            for i, search in enumerate(path.search_calls, start=1):
-                found = ", ".join(
-                    f"{passage.section} {passage.accession_no}"
-                    for passage in search.passages
-                )
-                print(f"--- search {i} ---\n{search.query}\n{found}\n")
+            for i, quote in enumerate(path.quote_calls, start=1):
+                print(f"--- quote {i} ---\n{quote.to_text()}\n")
     print(answer.text)
     queries = sum(len(p.sql_calls) for p in answer.paths)
-    searches = sum(len(p.search_calls) for p in answer.paths)
+    quotes = sum(len(p.quote_calls) for p in answer.paths)
     print(
         f"\n[route={answer.route.value}, {answer.rounds} round(s), "
-        f"{queries} query(ies), {searches} search(es)]",
+        f"{queries} query(ies), {quotes} quote(s)]",
         file=sys.stderr,
     )
     return 1 if answer.stopped_early else 0
 
 
-def _cmd_eval_run(args: argparse.Namespace) -> int:
-    started = time.monotonic()
-    results = run_eval(
-        only=args.only or None,
-        resume=args.resume,
-        max_seconds=args.max_seconds,
-    )
-    elapsed = time.monotonic() - started
-    print(f"ran {len(results)} questions in {elapsed:.0f}s\n")
-    print(format_scoreboard(results))
-    return 0
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    """Run the local-only Indian equity research dashboard."""
+    from sra.dashboard.app import run
 
-
-def _cmd_eval_score(_args: argparse.Namespace) -> int:
-    print(format_scoreboard(load_results()))
+    run(host=args.host, port=args.port)
     return 0
 
 
@@ -102,26 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate = sub.add_parser("migrate", help="create the database and apply sql/")
     migrate.set_defaults(func=_cmd_migrate)
 
-    ingest = sub.add_parser("ingest", help="ingest XBRL facts for tickers")
-    ingest.add_argument(
-        "tickers",
-        nargs="*",
-        help=f"tickers to ingest (default: {' '.join(DEFAULT_TICKERS)})",
-    )
-    ingest.add_argument(
-        "--refresh",
-        action="store_true",
-        help="bypass the SEC response cache",
-    )
-    ingest.set_defaults(func=_cmd_ingest)
-
-    index = sub.add_parser("index", help="parse, chunk and embed filing text")
-    index.add_argument("tickers", nargs="*")
-    index.add_argument("--annual", type=int, default=2, help="10-Ks per company")
-    index.add_argument("--quarterly", type=int, default=4, help="10-Qs per company")
-    index.set_defaults(func=_cmd_index)
-
-    ask_cmd = sub.add_parser("ask", help="ask a question about the filings")
+    ask_cmd = sub.add_parser("ask", help="ask about Indian equities or finance")
     ask_cmd.add_argument("question", nargs="+")
     ask_cmd.add_argument(
         "--explain",
@@ -135,45 +156,102 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_cmd.set_defaults(func=_cmd_ask)
 
-    evaluate = sub.add_parser("eval", help="run or score the eval set")
-    eval_sub = evaluate.add_subparsers(dest="eval_command", required=True)
+    dashboard = sub.add_parser(
+        "dashboard", help="run the local Indian-equity research dashboard"
+    )
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8000)
+    dashboard.set_defaults(func=_cmd_dashboard)
 
-    eval_run = eval_sub.add_parser(
-        "run", help="answer every question and store results"
+    upstox = sub.add_parser("upstox", help="Upstox (NSE/BSE live quotes) integration")
+    upstox_sub = upstox.add_subparsers(dest="upstox_command", required=True)
+
+    upstox_login = upstox_sub.add_parser(
+        "login", help="authorize and cache a daily Upstox access token"
     )
-    eval_run.add_argument(
-        "--only", nargs="*", help="question ids or types to run, e.g. numeric q001"
+    upstox_login.set_defaults(func=_cmd_upstox_login)
+
+    upstox_ingest = upstox_sub.add_parser(
+        "ingest-instruments", help="sync NSE/BSE equity listings from Upstox"
     )
-    eval_run.add_argument(
-        "--resume",
+    upstox_ingest.add_argument(
+        "tickers", nargs="*", help="specific NSE/BSE symbols to sync"
+    )
+    upstox_ingest.add_argument(
+        "--all", action="store_true", help="sync every NSE/BSE cash-equity listing"
+    )
+    upstox_ingest.add_argument(
+        "--refresh", action="store_true", help="bypass the instrument-master cache"
+    )
+    upstox_ingest.set_defaults(func=_cmd_upstox_ingest_instruments)
+
+    upstox_fund = upstox_sub.add_parser(
+        "ingest-fundamentals",
+        help="ingest P/E, ROE, revenue etc. for synced Indian listings",
+    )
+    upstox_fund.add_argument(
+        "tickers",
+        nargs="*",
+        help="specific NSE/BSE symbols to research",
+    )
+    upstox_fund.add_argument(
+        "--all",
         action="store_true",
-        help="keep answers already stored and retry only what is missing",
+        help="refresh fundamentals for every synced listing; this can take a long time",
     )
-    eval_run.add_argument(
-        "--max-seconds",
-        type=float,
-        default=None,
-        help="stop after this long, leaving the rest for a --resume run",
-    )
-    eval_run.set_defaults(func=_cmd_eval_run)
-
-    eval_score = eval_sub.add_parser(
-        "score", help="print the scoreboard from stored results"
-    )
-    eval_score.set_defaults(func=_cmd_eval_score)
+    upstox_fund.set_defaults(func=_cmd_upstox_ingest_fundamentals, resumable=True)
 
     return parser
+
+
+def _one_line(exc: BaseException) -> str:
+    return " ".join(str(exc).split())
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        configure_logging()
         return int(args.func(args))
-    except (OllamaError, EmbeddingError, StaleResultsError) as exc:
+    except UsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except (
+        OllamaError,
+        UpstoxError,
+        UnknownInstrumentError,
+    ) as exc:
         # An unreachable local model is the most common setup failure; a
         # traceback tells the user nothing they can act on.
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except psycopg.OperationalError as exc:
+        print(
+            f"error: cannot use the database (is Postgres running and "
+            f"SRA_DSN correct?): {_one_line(exc)}",
+            file=sys.stderr,
+        )
+        return 2
+    except psycopg.Error as exc:
+        print(f"error: database error: {_one_line(exc)}", file=sys.stderr)
+        return 2
+    except ValidationError as exc:
+        # Settings could not load; name the fields, never echo their values.
+        fields = ", ".join(sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]}))
+        print(
+            f"error: missing or invalid setting(s): {fields}. "
+            "Set them in .env (see .env.example).",
+            file=sys.stderr,
+        )
+        return 2
+    except KeyboardInterrupt:
+        message = "cancelled"
+        if getattr(args, "resumable", False):
+            message += (
+                "; completed listings were saved. Re-run the same command to resume."
+            )
+        print(message, file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
