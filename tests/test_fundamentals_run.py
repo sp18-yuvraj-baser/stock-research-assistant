@@ -297,3 +297,33 @@ def test_no_symbols_and_no_all_is_a_value_error(
 ) -> None:
     with pytest.raises(ValueError, match="--all"):
         ingest_fundamentals([])
+
+
+def test_all_run_stops_after_too_many_failures_in_a_row(
+    writes: list[tuple[str, dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fundamentals_run, "MAX_CONSECUTIVE_FAILURES", 2)
+    _FakeClient.behaviour = {
+        "INEAAA": UpstoxError("down"),
+        "INEBBB": UpstoxError("down"),
+        "INECCC": _OK,
+    }
+    seen: list[str] = []
+    with pytest.raises(UpstoxError, match="2 listings failed in a row"):
+        ingest_fundamentals(
+            all_equities=True, on_progress=lambda _i, _n, r: seen.append(r.ticker)
+        )
+    assert seen == ["AAA", "BBB"]  # CCC never attempted
+
+
+def test_a_success_resets_the_failure_streak(
+    writes: list[tuple[str, dict[str, Any]]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fundamentals_run, "MAX_CONSECUTIVE_FAILURES", 2)
+    _FakeClient.behaviour = {
+        "INEAAA": UpstoxError("down"),
+        "INEBBB": _OK,
+        "INECCC": UpstoxError("down"),
+    }
+    reports = ingest_fundamentals(all_equities=True)
+    assert [r.error for r in reports] == ["down", None, "down"]

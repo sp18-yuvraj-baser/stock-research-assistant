@@ -56,9 +56,10 @@ returned, convert currency, or recall a price from memory or an earlier turn.
 If get_live_quote returns an ERROR, state it plainly -- do not apologize and
 guess a price.
 
-Always state the fetched_at timestamp the tool returned alongside the price,
-and say plainly that it is a live quote valid only as of that moment -- never
-imply it is a closing price, an average, or a reported financial figure.
+Always state the time the tool returned (already in IST) alongside the price,
+exactly as written, and say plainly that it is a live quote valid only as of
+that moment -- never imply it is a closing price, an average, or a reported
+financial figure.
 
 SCOPE
   If a requested ticker is not in the synced NSE/BSE universe, say so plainly.
@@ -70,7 +71,7 @@ SCOPE
   asked for one of those, say plainly that this tool only tracks last price,
   rather than omitting the question or guessing a value.
 
-Answer in one sentence: ticker, last price in INR, and fetched_at timestamp.
+Answer in one sentence: ticker, exchange, last price in INR, and the IST time.
 """
 
 LIVE_QUOTE_TOOL = {

@@ -1,4 +1,8 @@
+"""Store NSE/BSE cash-equity listings from the Upstox instrument master."""
+
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 from sra.db import connect
 from sra.upstox.instruments import (
@@ -7,73 +11,11 @@ from sra.upstox.instruments import (
     resolve_instruments,
 )
 
-# Backward-compatible explicit-symbol sample for API users. The CLI does not
-# default to this list: use `--all` to sync the complete NSE/BSE universe.
-DEFAULT_NSE_TICKERS = (
-    "RELIANCE",
-    "TCS",
-    "HDFCBANK",
-    "ICICIBANK",
-    "INFY",
-    "HINDUNILVR",
-    "ITC",
-    "SBIN",
-    "BHARTIARTL",
-    "BAJFINANCE",
-    "KOTAKBANK",
-    "LT",
-    "HCLTECH",
-    "AXISBANK",
-    "MARUTI",
-    "SUNPHARMA",
-    "ASIANPAINT",
-    "TITAN",
-    "ULTRACEMCO",
-    "WIPRO",
-    "NESTLEIND",
-    "ADANIENT",
-    "ADANIPORTS",
-    "TMPV",
-    "TATASTEEL",
-    "POWERGRID",
-    "NTPC",
-    "M&M",
-    "BAJAJFINSV",
-    "JSWSTEEL",
-    "TECHM",
-    "HDFCLIFE",
-    "SBILIFE",
-    "GRASIM",
-    "CIPLA",
-    "DRREDDY",
-    "BRITANNIA",
-    "EICHERMOT",
-    "COALINDIA",
-    "DIVISLAB",
-    "APOLLOHOSP",
-    "HEROMOTOCO",
-    "BPCL",
-    "ONGC",
-    "SHRIRAMFIN",
-    "INDUSINDBK",
-    "TATACONSUM",
-    "UPL",
-    "HINDALCO",
-    "BAJAJ-AUTO",
-    "TRENT",
-    "JIOFIN",
-)
+log = logging.getLogger(__name__)
 
+# The master occasionally gives no name, and the ticker then stands in for
+# it; that placeholder must never replace a real name already stored.
 UPSERT_INSTRUMENT = """
-INSERT INTO instruments (instrument_key, ticker, exchange, name)
-VALUES (%(instrument_key)s, %(ticker)s, %(exchange)s, %(name)s)
-ON CONFLICT (instrument_key) DO UPDATE
-SET ticker = EXCLUDED.ticker, exchange = EXCLUDED.exchange, name = EXCLUDED.name
-"""
-
-# Explicit-ticker path: the incoming name is only a placeholder (the ticker)
-# when the master gave none, so never let it replace a stored real name.
-UPSERT_INSTRUMENT_KEEP_NAME = """
 INSERT INTO instruments (instrument_key, ticker, exchange, name)
 VALUES (%(instrument_key)s, %(ticker)s, %(exchange)s, %(name)s)
 ON CONFLICT (instrument_key) DO UPDATE
@@ -85,41 +27,6 @@ SET ticker = EXCLUDED.ticker,
 
 
 @dataclass(frozen=True)
-class InstrumentIngestReport:
-    ticker: str
-    instrument_key: str
-    exchange: str
-
-
-def ingest_instruments(
-    tickers: list[str] | None = None, *, refresh: bool = False
-) -> list[InstrumentIngestReport]:
-    """Resolve named NSE/BSE tickers and upsert them. Safe to re-run."""
-    requested = list(tickers or [])
-    if not requested:
-        raise ValueError("provide one or more symbols, or use `--all`")
-    resolved = resolve_instruments(requested, refresh=refresh)
-    # resolve_instruments returns no company name; take it from the master so a
-    # new listing is stored with its real name, falling back to the ticker.
-    names = {e.instrument_key: e.name for e in list_indian_equities()}
-    reports = []
-    with connect() as conn:
-        for ticker, (instrument_key, exchange) in resolved.items():
-            conn.execute(
-                UPSERT_INSTRUMENT_KEEP_NAME,
-                {
-                    "instrument_key": instrument_key,
-                    "ticker": ticker,
-                    "exchange": exchange,
-                    "name": names.get(instrument_key, ticker),
-                },
-            )
-            reports.append(InstrumentIngestReport(ticker, instrument_key, exchange))
-        conn.commit()
-    return reports
-
-
-@dataclass(frozen=True)
 class SkippedInstrument:
     ticker: str
     exchange: str
@@ -128,7 +35,7 @@ class SkippedInstrument:
 
 @dataclass(frozen=True)
 class InstrumentSyncResult:
-    synced: int
+    synced: list[EquityInstrument]
     skipped: list[SkippedInstrument]
 
 
@@ -157,15 +64,9 @@ def split_conflicting(
     return keep, skipped
 
 
-def ingest_all_indian_equities(*, refresh: bool = False) -> InstrumentSyncResult:
-    """Store the complete NSE/BSE cash-equity universe from Upstox.
-
-    The source master is authoritative for membership; rerunning this updates
-    instruments already stored and adds new listings without deleting history.
-    A listing whose (ticker, exchange) is already held by a different
-    instrument_key is skipped and reported rather than rekeyed or crashed on.
-    """
-    equities = list_indian_equities(refresh=refresh)
+def _store(equities: list[EquityInstrument]) -> InstrumentSyncResult:
+    """Upsert listings in one transaction, skipping (ticker, exchange)
+    conflicts instead of crashing on them. Safe to re-run."""
     with connect() as conn:
         held = {
             (str(row["ticker"]), str(row["exchange"])): str(row["instrument_key"])
@@ -174,18 +75,42 @@ def ingest_all_indian_equities(*, refresh: bool = False) -> InstrumentSyncResult
             ).fetchall()
         }
         keep, skipped = split_conflicting(equities, held)
+        rows: list[dict[str, Any]] = [
+            {
+                "instrument_key": equity.instrument_key,
+                "ticker": equity.ticker,
+                "exchange": equity.exchange,
+                "name": equity.name,
+            }
+            for equity in keep
+        ]
         with conn.cursor() as cursor:
-            cursor.executemany(
-                UPSERT_INSTRUMENT,
-                [
-                    {
-                        "instrument_key": equity.instrument_key,
-                        "ticker": equity.ticker,
-                        "exchange": equity.exchange,
-                        "name": equity.name,
-                    }
-                    for equity in keep
-                ],
-            )
+            cursor.executemany(UPSERT_INSTRUMENT, rows)
         conn.commit()
-    return InstrumentSyncResult(len(keep), skipped)
+    for item in skipped:
+        log.warning(
+            "skipped %s (%s): ticker already stored under another instrument key",
+            item.ticker,
+            item.exchange,
+        )
+    log.info("stored %d listing(s), skipped %d", len(keep), len(skipped))
+    return InstrumentSyncResult(keep, skipped)
+
+
+def ingest_instruments(
+    tickers: list[str] | None = None, *, refresh: bool = False
+) -> InstrumentSyncResult:
+    """Resolve named NSE tickers from the master and store them."""
+    requested = list(tickers or [])
+    if not requested:
+        raise ValueError("provide one or more symbols, or use `--all`")
+    return _store(list(resolve_instruments(requested, refresh=refresh).values()))
+
+
+def ingest_all_indian_equities(*, refresh: bool = False) -> InstrumentSyncResult:
+    """Store the complete NSE/BSE cash-equity universe from Upstox.
+
+    The master is authoritative for membership; rerunning updates stored
+    listings and adds new ones without deleting history.
+    """
+    return _store(list_indian_equities(refresh=refresh))

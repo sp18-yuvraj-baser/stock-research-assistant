@@ -1,12 +1,14 @@
 """Thin HTTP client for Upstox Market Data endpoints.
 
-Unlike SecClient, a response is never written to disk: a quote is only
-correct for the instant it was fetched, so a TTL cache would let a stale
-price silently outlive its truth. Rate limiting is still applied so repeated
-questions in a short window do not hammer Upstox's API.
+A response is never cached: a quote is only correct for the instant it was
+fetched, so a TTL cache would let a stale price silently outlive its truth.
+Answering questions goes through one shared client per process, so its TLS
+connection is reused and its rate limit applies across every request rather
+than per call.
 """
 
 import contextlib
+import threading
 import time
 from typing import Any
 
@@ -57,6 +59,8 @@ class UpstoxClient:
         cfg = settings()
         self._min_interval = 1.0 / cfg.upstox_max_requests_per_second
         self._last_request_at = 0.0
+        # Dashboard requests run on worker threads that share this client.
+        self._throttle_lock = threading.Lock()
         self._client = httpx.Client(
             base_url="https://api.upstox.com",
             headers={
@@ -71,15 +75,13 @@ class UpstoxClient:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
         self._client.close()
 
     def get_json(self, path: str, *, params: dict[str, str], attempts: int = 4) -> Any:
-        """GET with retry/backoff, same shape as SecClient._fetch.
-
-        A transient network blip here (fundamentals now auto-refresh inline
-        while answering a live question, not only from a rerunnable manual
-        ingest command) must not crash the question with a raw traceback.
-        """
+        """GET with bounded retry and backoff; every failure is an UpstoxError."""
         last_error: Exception | None = None
         for attempt in range(attempts):
             self._throttle()
@@ -114,7 +116,33 @@ class UpstoxClient:
         ) from last_error
 
     def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_request_at
-        if elapsed < self._min_interval:
-            time.sleep(self._min_interval - elapsed)
-        self._last_request_at = time.monotonic()
+        with self._throttle_lock:
+            elapsed = time.monotonic() - self._last_request_at
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_request_at = time.monotonic()
+
+
+_shared_lock = threading.Lock()
+_shared: UpstoxClient | None = None
+
+
+def shared_client() -> UpstoxClient:
+    """The process's one client for answering questions, created on first use.
+
+    The token is read when it is created; call reset_shared_client() after an
+    auth failure so the next request picks up a token from `sra upstox login`.
+    """
+    global _shared
+    with _shared_lock:
+        if _shared is None:
+            _shared = UpstoxClient()
+        return _shared
+
+
+def reset_shared_client() -> None:
+    global _shared
+    with _shared_lock:
+        if _shared is not None:
+            _shared.close()
+            _shared = None

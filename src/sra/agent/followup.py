@@ -11,15 +11,14 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-import httpx
-
-from sra.agent.loop import OllamaError, chat
-from sra.config import settings
+from sra.agent.loop import OllamaError, chat, ollama_client
 
 # Enough for "what about X?" chains without drowning a small local model.
 MAX_HISTORY_MESSAGES = 6
 # Assistant answers are long; their opening says what they were about.
 MAX_MESSAGE_CHARS = 600
+# A rewrite is one short line; waiting longer means the model is stuck.
+REWRITE_TIMEOUT_SECONDS = 120.0
 # A rewrite longer than this is the model answering, not rewriting.
 MAX_REWRITE_CHARS = 400
 
@@ -101,10 +100,13 @@ def standalone_question(question: str, history: list[Turn]) -> str:
         {"role": "user", "content": _transcript(question, history)},
     ]
     try:
-        with httpx.Client(
-            base_url=settings().ollama_url, timeout=httpx.Timeout(120.0)
-        ) as client:
-            payload = chat(client, messages, [], think=False)
+        payload = chat(
+            ollama_client(),
+            messages,
+            [],
+            think=False,
+            timeout=REWRITE_TIMEOUT_SECONDS,
+        )
     except OllamaError:
         # The paths that need the model will report it; the ones that do not
         # (holding review) can still answer the message as typed.

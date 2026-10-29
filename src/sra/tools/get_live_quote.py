@@ -3,21 +3,39 @@ import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import psycopg
 
 from sra.db import connect
-from sra.upstox.client import UpstoxClient, UpstoxError
-from sra.upstox.instruments import UnknownInstrumentError
+from sra.upstox.client import (
+    UpstoxAuthError,
+    UpstoxError,
+    reset_shared_client,
+    shared_client,
+)
+from sra.upstox.instruments import UnknownInstrumentError, lookup_instrument
 
 log = logging.getLogger(__name__)
+
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def ist_time(stamp: object) -> str:
+    """A datetime or ISO string as Indian time, e.g. '29 Oct 2026, 14:31 IST'.
+
+    Market hours and every user here are in IST; a raw UTC ISO string makes
+    the reader do timezone arithmetic just to see whether the market was open.
+    """
+    moment = (
+        stamp if isinstance(stamp, datetime) else datetime.fromisoformat(str(stamp))
+    )
+    return moment.astimezone(IST).strftime("%d %b %Y, %H:%M IST")
 
 
 class QuoteClient(Protocol):
     """Structural shape of UpstoxClient, so a test fake needs no inheritance."""
 
-    def __enter__(self) -> "QuoteClient": ...
-    def __exit__(self, *exc: object) -> None: ...
     def get_json(self, path: str, *, params: dict[str, str]) -> Any: ...
 
 
@@ -33,41 +51,12 @@ class LiveQuote:
     def to_text(self) -> str:
         if self.error:
             return f"ERROR: {self.error}"
+        exchange = self.exchange.removesuffix("_EQ")
         return (
-            f"{self.ticker} ({self.instrument_key}, {self.exchange}): "
-            f"last price {self.last_price} INR, fetched at {self.fetched_at} UTC. "
-            "This is a live NSE/BSE quote from Upstox."
+            f"{self.ticker} ({exchange}): last price {self.last_price} INR at "
+            f"{ist_time(self.fetched_at)}. This is a live NSE/BSE quote from "
+            "Upstox, valid only at that moment."
         )
-
-
-def resolve_instrument_key(
-    ticker: str, *, exchange: str | None = None
-) -> tuple[str, str]:
-    with connect(readonly=True) as conn:
-        if exchange is None:
-            row = conn.execute(
-                "SELECT instrument_key, exchange FROM instruments "
-                "WHERE ticker = upper(%s) "
-                # NSE is the primary listing; BSE only when NSE lacks the symbol.
-                "ORDER BY exchange = 'NSE_EQ' DESC, exchange LIMIT 1",
-                (ticker,),
-            ).fetchone()
-        else:
-            segment = (
-                f"{exchange.upper()}_EQ"
-                if exchange.upper() in {"NSE", "BSE"}
-                else exchange.upper()
-            )
-            row = conn.execute(
-                "SELECT instrument_key, exchange FROM instruments "
-                "WHERE ticker = upper(%s) AND exchange = upper(%s)",
-                (ticker, segment),
-            ).fetchone()
-    if row is None:
-        raise UnknownInstrumentError(
-            f"{ticker!r} is not in the synced NSE/BSE equity universe"
-        )
-    return str(row["instrument_key"]), str(row["exchange"])
 
 
 def _log_quote(instrument_key: str, last_price: float | None, fetched_at: str) -> None:
@@ -115,12 +104,7 @@ def get_live_quote(
     as an exception, so one bad lookup cannot abort the answer being built."""
     fetched_at = datetime.now(UTC).isoformat(timespec="seconds")
     try:
-        if exchange is None:
-            instrument_key, resolved_exchange = resolve_instrument_key(ticker)
-        else:
-            instrument_key, resolved_exchange = resolve_instrument_key(
-                ticker, exchange=exchange
-            )
+        listing = lookup_instrument(ticker, exchange=exchange)
     except UnknownInstrumentError as exc:
         return LiveQuote(ticker, "", "", None, fetched_at, error=str(exc))
     except psycopg.Error as exc:
@@ -133,12 +117,16 @@ def get_live_quote(
             error=f"could not look up the instrument: {str(exc).strip()}",
         )
 
+    instrument_key, resolved_exchange = listing.instrument_key, listing.exchange
     try:
-        with client or UpstoxClient() as c:
-            payload = c.get_json(
-                "/v2/market-quote/ltp", params={"instrument_key": instrument_key}
-            )
+        payload = (client or shared_client()).get_json(
+            "/v2/market-quote/ltp", params={"instrument_key": instrument_key}
+        )
     except UpstoxError as exc:
+        if isinstance(exc, UpstoxAuthError) and client is None:
+            # The shared client holds the rejected token; rebuild it so the
+            # next question reads the token a fresh `sra upstox login` wrote.
+            reset_shared_client()
         return LiveQuote(
             ticker, instrument_key, resolved_exchange, None, fetched_at, error=str(exc)
         )

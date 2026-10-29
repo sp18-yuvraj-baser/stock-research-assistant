@@ -14,11 +14,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
+
+import psycopg
 
 from sra.agent.loop import PathResult
-from sra.tools.get_live_quote import LiveQuote, get_live_quote
+from sra.tools.get_live_quote import LiveQuote, get_live_quote, ist_time
 from sra.tools.run_sql import SqlResult, run_sql
+from sra.upstox.instruments import EquityInstrument, match_instruments
 
 DISCLAIMER = (
     "This is research, not investment advice. For a personal recommendation, "
@@ -34,7 +36,6 @@ valuation against its sector and its profit trend.
 
 {DISCLAIMER}"""
 
-IST = ZoneInfo("Asia/Kolkata")
 
 # Words that occur in holding questions but never start or end a company
 # name in them. Without this, "time" resolves to TIME TECHNOPLAST and "idea"
@@ -136,12 +137,6 @@ class Position:
     conflicting: bool = False
 
 
-@dataclass(frozen=True)
-class Company:
-    ticker: str
-    name: str
-
-
 def _number(value: object) -> Decimal | None:
     """A finite Decimal, or None for NULL, NaN or anything unparseable."""
     if value is None:
@@ -206,13 +201,13 @@ def _candidate_phrases(question: str) -> list[tuple[range, str]]:
 
 @dataclass(frozen=True)
 class Resolution:
-    companies: list[Company]
+    companies: list[EquityInstrument]
     # Several listed names start with the phrase and none was named exactly.
-    ambiguous: list[Company]
+    ambiguous: list[EquityInstrument]
     error: str | None = None
     # Matches set aside because a stronger one was found; named in the
     # answer so a second company is never dropped silently.
-    set_aside: list[Company] = field(default_factory=list)
+    set_aside: list[EquityInstrument] = field(default_factory=list)
     # The companies came from confident matches, not a lone lowercase word.
     confident: bool = False
 
@@ -228,25 +223,20 @@ def resolve_companies(question: str) -> Resolution:
         return Resolution([], [])
     keys = {phrase: _ALIASES.get(phrase, phrase.replace(" ", "").upper())
             for _, phrase in phrases}  # fmt: skip
-    result = run_sql(
-        "SELECT ticker, name FROM instruments WHERE exchange = 'NSE_EQ' AND "
-        "(ticker = ANY(%(tickers)s) OR upper(name) = ANY(%(names)s) "
-        "OR upper(name) LIKE ANY(%(prefixes)s))",
-        {
-            "tickers": sorted(set(keys.values())),
-            "names": [p.upper() for _, p in phrases],
-            "prefixes": [f"{p.upper()} %" for _, p in phrases],
-        },
-    )
-    if result.error:
-        return Resolution([], [], error=result.error)
-    rows = [Company(str(r["ticker"]), str(r["name"])) for r in result.rows]
+    try:
+        rows = match_instruments(
+            tickers=sorted(set(keys.values())),
+            names=[p.upper() for _, p in phrases],
+            prefixes=[f"{p.upper()} %" for _, p in phrases],
+        )
+    except psycopg.Error as exc:
+        return Resolution([], [], error=str(exc).strip())
     # A single lowercase word is weak: "global" is a ticker and "action" starts
     # a listed name, but in "the global slowdown" or "the RBI action" neither
     # names a company. It counts only when nothing stronger matched.
-    strong: list[Company] = []
-    weak: list[Company] = []
-    ambiguous: list[Company] = []
+    strong: list[EquityInstrument] = []
+    weak: list[EquityInstrument] = []
+    ambiguous: list[EquityInstrument] = []
     claimed: set[int] = set()
     for words, phrase in phrases:
         if claimed.intersection(words):
@@ -295,13 +285,6 @@ def _money(value: Decimal | float) -> str:
 
 def _figure(name: str, value: Decimal) -> str:
     return f"{value.normalize():f}{'%' if name in _PERCENT else ''}"
-
-
-def _ist(stamp: object) -> str:
-    moment = (
-        stamp if isinstance(stamp, datetime) else datetime.fromisoformat(str(stamp))
-    )
-    return moment.astimezone(IST).strftime("%d %b %Y, %H:%M IST")
 
 
 @dataclass(frozen=True)
@@ -460,7 +443,7 @@ def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
         return [f"Live price unavailable: {quote.error or 'no valid price returned'}."]
     price = Decimal(str(quote.last_price))
     exchange = quote.exchange.removesuffix("_EQ") or "NSE"
-    lines = [f"Live price: {_money(price)} ({exchange}, {_ist(quote.fetched_at)})"]
+    lines = [f"Live price: {_money(price)} ({exchange}, {ist_time(quote.fetched_at)})"]
     if position.conflicting:
         lines.append(
             "Position value left out: the question gives more than one share "
@@ -477,6 +460,13 @@ def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
         lines.append(
             f"Bought at {_money(position.buy_price)}: unrealised {word} "
             f"{_money(abs(gain))} ({_pct(cost, value):+}%)"
+        )
+        # The live price is post-adjustment; a pre-bonus buy price is not, so
+        # a 1:1 bonus alone shows as a 50% loss.
+        lines.append(
+            "If you bought before a bonus issue or stock split, divide your buy "
+            "price by the adjustment ratio (and multiply your share count) first; "
+            "otherwise this gain or loss is wrong."
         )
     return lines
 
@@ -526,21 +516,19 @@ def review(question: str) -> PathResult:
 
     result = PathResult()
     position = parse_position(question)
-    quote = get_live_quote(company.ticker, exchange="NSE")
+    quote = get_live_quote(company.ticker, exchange=company.exchange)
     result.quote_calls.append(quote)
-    params = {"ticker": company.ticker}
+    params = {"key": company.instrument_key}
     ratios_sql = run_sql(
-        "SELECT fr.name, fr.company_value, fr.sector_value, fr.fetched_at "
-        "FROM fundamental_ratios fr JOIN instruments i USING (instrument_key) "
-        "WHERE i.ticker = %(ticker)s AND i.exchange = 'NSE_EQ'",
+        "SELECT name, company_value, sector_value, fetched_at "
+        "FROM fundamental_ratios WHERE instrument_key = %(key)s",
         params,
     )
     financials_sql = run_sql(
-        "SELECT ff.category, ff.period, ff.value FROM fundamental_financials ff "
-        "JOIN instruments i USING (instrument_key) "
-        "WHERE i.ticker = %(ticker)s AND i.exchange = 'NSE_EQ' "
-        "AND ff.statement = 'income_statement' AND ff.time_period = 'yearly' "
-        "AND ff.category IN ('revenue', 'net_profit')",
+        "SELECT category, period, value FROM fundamental_financials "
+        "WHERE instrument_key = %(key)s "
+        "AND statement = 'income_statement' AND time_period = 'yearly' "
+        "AND category IN ('revenue', 'net_profit')",
         params,
     )
     result.sql_calls.extend([ratios_sql, financials_sql])
@@ -560,7 +548,7 @@ def review(question: str) -> PathResult:
     if ratios_sql.error:
         sections.append(f"{heading}\n  Data lookup failed: {ratios_sql.error}")
     elif ratios:
-        fetched = _ist(ratios_sql.rows[0]["fetched_at"])
+        fetched = ist_time(ratios_sql.rows[0]["fetched_at"])
         sections.append(
             f"{heading} (as of {fetched})\n"
             + "\n".join(f"  {_describe_ratio(r)}" for r in ratios)

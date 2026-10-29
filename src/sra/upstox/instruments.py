@@ -1,11 +1,12 @@
-"""Resolve human tickers to Upstox instrument keys via the instrument master.
+"""The NSE/BSE cash-equity universe: which listing a symbol or name means.
 
-Upstox publishes one bulk file listing every tradable instrument on NSE/BSE.
-Unlike a live quote, this list changes rarely, so it is safe to cache with a
-TTL -- the opposite caching decision from client.py's live-quote calls. Used
-only at ingest time: answering a chat question resolves ticker -> instrument
-key from the already-populated `instruments` table instead (see
-tools/get_live_quote.py), so it never depends on this file being reachable.
+Two sources, one set of rules. At ingest time the Upstox instrument master
+(one bulk file of every tradable instrument) is filtered to plain cash
+equities and stored in the `instruments` table. At answer time every lookup
+reads that table instead, so a chat question never depends on the bulk file
+being reachable. Both directions prefer the NSE listing and fall back to BSE
+only when NSE lacks the symbol, so a quote, a holding review and an ingest
+run all agree on which listing a symbol means.
 """
 
 import gzip
@@ -19,6 +20,7 @@ from typing import Any
 import httpx
 
 from sra.config import settings
+from sra.db import connect
 from sra.upstox.client import UpstoxError
 
 INSTRUMENT_MASTER_URL = (
@@ -89,36 +91,56 @@ def _write_atomically(path: Path, data: bytes) -> None:
         raise
 
 
+def _cash_equity(record: dict[str, Any]) -> EquityInstrument | None:
+    """The listing a master record describes, if it is a plain cash equity.
+
+    Upstox keys the exchange+series as `segment` ('NSE_EQ', 'BSE_EQ') and the
+    series itself as `instrument_type`; both must be checked, because
+    `segment` alone also matches SME, odd-lot and other non-equity series.
+    Kept, exactly: NSE 'EQ' and BSE 'A'. Trade-for-trade NSE 'BE' and every
+    other BSE group (B, T, Z, X, XT, ...) are deliberately excluded.
+    """
+    segment = str(record.get("segment") or "")
+    instrument_type = str(record.get("instrument_type") or "")
+    if (segment, instrument_type) not in {("NSE_EQ", "EQ"), ("BSE_EQ", "A")}:
+        return None
+    ticker = str(record.get("trading_symbol") or "").upper()
+    instrument_key = str(record.get("instrument_key") or "")
+    if not ticker or not instrument_key:
+        return None
+    return EquityInstrument(
+        ticker=ticker,
+        instrument_key=instrument_key,
+        exchange=segment,
+        name=str(record.get("name") or ticker),
+    )
+
+
+def list_indian_equities(*, refresh: bool = False) -> list[EquityInstrument]:
+    """Every plain NSE/BSE cash equity in the instrument master, one per
+    (ticker, segment), sorted for a stable sync order."""
+    equities: dict[tuple[str, str], EquityInstrument] = {}
+    for record in fetch_instrument_master(refresh=refresh):
+        equity = _cash_equity(record)
+        if equity is not None:
+            equities[(equity.ticker, equity.exchange)] = equity
+    return sorted(equities.values(), key=lambda item: (item.exchange, item.ticker))
+
+
 def resolve_instruments(
     tickers: list[str], *, segment: str = "NSE_EQ", refresh: bool = False
-) -> dict[str, tuple[str, str]]:
-    """Map trading symbols to (instrument_key, segment).
+) -> dict[str, EquityInstrument]:
+    """Map trading symbols to their cash-equity listing in one segment.
 
-    Mirrors sec.tickers.resolve_tickers: raises on any unresolved ticker so a
-    typo in an ingest run fails loudly instead of silently tracking fewer
-    tickers than asked for.
-
-    Upstox's instrument master keys the exchange+series as `segment` (e.g.
-    'NSE_EQ', 'BSE_EQ'), separate from the plain `exchange` field ('NSE',
-    'BSE') and from `instrument_type`, which is a series code -- plain
-    equities are 'EQ', while index/derivative/other-series rows use dozens of
-    other codes. Both must be checked: `segment` alone also matches
-    non-equity series such as SME or odd-lot rows.
-
-    Series kept: NSE 'EQ' (segment NSE_EQ) and BSE 'A' (segment BSE_EQ) only.
-    Trade-for-trade NSE 'BE' and every other BSE group (B, T, Z, X, XT, ...)
-    are deliberately excluded, so a ticker that trades only in one of those
-    series raises UnknownInstrumentError instead of resolving.
+    Raises on any unresolved ticker so a typo in an ingest run fails loudly
+    instead of silently tracking fewer tickers than asked for.
     """
-    records = fetch_instrument_master(refresh=refresh)
     by_symbol = {
-        str(r["trading_symbol"]).upper(): (str(r["instrument_key"]), str(r["segment"]))
-        for r in records
-        # NSE calls its plain equity series "EQ"; BSE instrument-master
-        # records use "A" for the comparable listed-equity series.
-        if r.get("segment") == segment and r.get("instrument_type") in {"EQ", "A"}
+        equity.ticker: equity
+        for equity in list_indian_equities(refresh=refresh)
+        if equity.exchange == segment
     }
-    resolved: dict[str, tuple[str, str]] = {}
+    resolved: dict[str, EquityInstrument] = {}
     unknown: list[str] = []
     for ticker in tickers:
         key = ticker.upper()
@@ -131,35 +153,68 @@ def resolve_instruments(
     return resolved
 
 
-def list_indian_equities(*, refresh: bool = False) -> list[EquityInstrument]:
-    """Return every plain NSE/BSE equity in the Upstox instrument master.
+def _segment(exchange: str) -> str:
+    upper = exchange.upper()
+    return f"{upper}_EQ" if upper in {"NSE", "BSE"} else upper
 
-    Derivatives, indices, SME/odd-lot series, and duplicate master records are
-    excluded so the local coverage table is a stable cash-equity universe.
 
-    Series kept, exactly: NSE 'EQ' (segment NSE_EQ) and BSE 'A' (segment
-    BSE_EQ). Trade-for-trade NSE 'BE' and all other BSE groups (B, T, Z, X,
-    XT, ...) are deliberately excluded, so securities listed only in those
-    series are absent from the universe. Duplicates are collapsed per
-    (ticker, segment).
+def lookup_instrument(ticker: str, *, exchange: str | None = None) -> EquityInstrument:
+    """The stored listing for a symbol: NSE first, BSE only when NSE lacks it.
+
+    Raises UnknownInstrumentError when the symbol is not in the synced
+    universe, and lets psycopg.Error through for the caller to report.
     """
-    records = fetch_instrument_master(refresh=refresh)
-    equities: dict[tuple[str, str], EquityInstrument] = {}
-    for record in records:
-        segment = str(record.get("segment") or "")
-        instrument_type = str(record.get("instrument_type") or "")
-        is_nse_equity = segment == "NSE_EQ" and instrument_type == "EQ"
-        is_bse_equity = segment == "BSE_EQ" and instrument_type == "A"
-        if not (is_nse_equity or is_bse_equity):
-            continue
-        ticker = str(record.get("trading_symbol") or "").upper()
-        instrument_key = str(record.get("instrument_key") or "")
-        if not ticker or not instrument_key:
-            continue
-        equities[(ticker, segment)] = EquityInstrument(
-            ticker=ticker,
-            instrument_key=instrument_key,
-            exchange=segment,
-            name=str(record.get("name") or ticker),
+    with connect(readonly=True) as conn:
+        row = conn.execute(
+            "SELECT ticker, instrument_key, exchange, name FROM instruments "
+            "WHERE ticker = upper(%(ticker)s) "
+            "AND (%(segment)s::text IS NULL OR exchange = %(segment)s) "
+            "ORDER BY exchange = 'NSE_EQ' DESC, exchange LIMIT 1",
+            {"ticker": ticker, "segment": _segment(exchange) if exchange else None},
+        ).fetchone()
+    if row is None:
+        raise UnknownInstrumentError(
+            f"{ticker!r} is not in the synced NSE/BSE equity universe"
         )
-    return sorted(equities.values(), key=lambda item: (item.exchange, item.ticker))
+    return EquityInstrument(
+        str(row["ticker"]),
+        str(row["instrument_key"]),
+        str(row["exchange"]),
+        str(row["name"]),
+    )
+
+
+def match_instruments(
+    *, tickers: list[str], names: list[str], prefixes: list[str]
+) -> list[EquityInstrument]:
+    """Stored listings whose symbol is in `tickers`, whose upper-cased name is
+    in `names`, or whose name matches a LIKE pattern in `prefixes`.
+
+    One result per symbol. The name is the one that matched (NSE and BSE spell
+    names differently, and callers compare against it), while the key and
+    exchange are always the preferred listing, NSE first. Lets psycopg.Error
+    through.
+    """
+    with connect(readonly=True) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT ON (m.ticker) m.ticker, m.name, "
+            "p.instrument_key, p.exchange "
+            "FROM instruments m CROSS JOIN LATERAL ("
+            "  SELECT instrument_key, exchange FROM instruments p "
+            "  WHERE p.ticker = m.ticker "
+            "  ORDER BY p.exchange = 'NSE_EQ' DESC, p.exchange LIMIT 1"
+            ") p "
+            "WHERE m.ticker = ANY(%(tickers)s) OR upper(m.name) = ANY(%(names)s) "
+            "OR upper(m.name) LIKE ANY(%(prefixes)s) "
+            "ORDER BY m.ticker, m.exchange = 'NSE_EQ' DESC, m.exchange",
+            {"tickers": tickers, "names": names, "prefixes": prefixes},
+        ).fetchall()
+    return [
+        EquityInstrument(
+            str(r["ticker"]),
+            str(r["instrument_key"]),
+            str(r["exchange"]),
+            str(r["name"]),
+        )
+        for r in rows
+    ]

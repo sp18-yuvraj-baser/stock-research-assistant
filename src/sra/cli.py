@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from sra.agent.compose import ask
 from sra.agent.loop import OllamaError
-from sra.config import settings
+from sra.config import configure_logging, settings
 from sra.ingest.fundamentals_run import FundamentalsIngestReport, ingest_fundamentals
 from sra.ingest.instruments_run import ingest_all_indian_equities, ingest_instruments
 from sra.migrate import apply_migrations
@@ -53,20 +53,23 @@ def _cmd_upstox_ingest_instruments(args: argparse.Namespace) -> int:
         raise UsageError("give either tickers or --all, not both")
     if not args.all and not args.tickers:
         raise UsageError("give one or more tickers, or --all")
+    result = (
+        ingest_all_indian_equities(refresh=args.refresh)
+        if args.all
+        else ingest_instruments(args.tickers, refresh=args.refresh)
+    )
     if args.all:
-        result = ingest_all_indian_equities(refresh=args.refresh)
-        print(f"synced {result.synced} NSE/BSE cash-equity listings")
-        if result.skipped:
-            names = ", ".join(f"{s.ticker} ({s.exchange})" for s in result.skipped)
-            print(
-                f"skipped {len(result.skipped)} listing(s) whose ticker is already "
-                f"stored under a different instrument key: {names}",
-                file=sys.stderr,
-            )
-        return 0
-    reports = ingest_instruments(args.tickers, refresh=args.refresh)
-    for r in reports:
-        print(f"{r.ticker:<10}{r.exchange:<10}{r.instrument_key}")
+        print(f"synced {len(result.synced)} NSE/BSE cash-equity listings")
+    else:
+        for equity in result.synced:
+            print(f"{equity.ticker:<10}{equity.exchange:<10}{equity.instrument_key}")
+    if result.skipped:
+        names = ", ".join(f"{s.ticker} ({s.exchange})" for s in result.skipped)
+        print(
+            f"skipped {len(result.skipped)} listing(s) whose ticker is already "
+            f"stored under a different instrument key: {names}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -208,6 +211,7 @@ def _one_line(exc: BaseException) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        configure_logging()
         return int(args.func(args))
     except UsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
