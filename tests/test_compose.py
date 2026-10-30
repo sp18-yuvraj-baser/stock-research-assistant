@@ -99,3 +99,14 @@ def test_no_lookup_when_the_regexes_already_route_it(
     assert ask("TCS share price").route is Route.REALTIME
     assert looked_up == []
     assert ran == ["fundamentals", "realtime"]
+
+
+def test_a_request_for_stocks_gets_the_code_rendered_screen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sra.agent import screen
+
+    monkeypatch.setattr(screen, "run", lambda q: PathResult(text="screened"))
+    answer = ask("suggest me some stocks for long term investment")
+    assert answer.route is Route.SCREEN
+    assert answer.text == "screened"

@@ -12,10 +12,26 @@ from enum import StrEnum
 
 class Route(StrEnum):
     ADVICE = "advice"
+    SCREEN = "screen"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
     OUT_OF_SCOPE = "out_of_scope"
+
+
+# Asking for a list of stocks rather than about one: answered by the
+# fundamentals screen. Plural or "which stock(s)", so "is TCS a good stock"
+# stays a question about TCS.
+_SCREEN = (
+    r"\b(suggest|recommend|best|top|good|great|strong|quality|safe|some|few)\b"
+    r"(?:\s+\w+){0,3}?\s+(stocks|shares|companies)\b",
+    r"\b(which|what) (indian |nse |bse )?(stocks?|shares?|companies)\b"
+    r".{0,30}\b(should|to|can|could) (i|we) (buy|invest|pick|choose|add)",
+    r"\b(stocks?|shares?) (to|for) (buy|invest|long.term)",
+    r"\bmultibaggers?\b",
+    r"\b(konse|kaun ?se|kon ?se) (stocks?|shares?)\b",
+    r"\bwhere (should|can) (i|we) invest\b",
+)
 
 
 @dataclass(frozen=True)
@@ -116,7 +132,8 @@ _REALTIME_PRICE = (
 _REALTIME_PRICE_ASK = (
     r"\bshare price\b",
     r"\bstock price\b",
-    r"\bprice of\b",
+    # Not "at the price of 709": a price the user paid is not a quote request.
+    r"\bprice of (?!\s*(rs\.?|inr|₹)?\s*\d)",
 )
 
 _FUNDAMENTALS = (
@@ -207,6 +224,11 @@ def route_question(
         return Routing(
             Route.OUT_OF_SCOPE, tuple(f"outside_india:{item}" for item in foreign)
         )
+
+    # Before advice: "which stock should I pick?" names no company to review.
+    screen = [] if _matches(text, _HOLDING) else _matches(text, _SCREEN)
+    if screen and not _matches(text, _EDUCATION):
+        return Routing(Route.SCREEN, tuple(f"screen:{item}" for item in screen))
 
     advice = _matches(text, _ADVICE)
     if not _matches(text, _EDUCATION):

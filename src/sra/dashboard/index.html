@@ -177,7 +177,7 @@
     const HISTORY_SENT = 10;
     const ASSISTANT_CHARS_SENT = 1500;
     const ROUTE_LABELS = {
-      advice: 'Holding review', realtime: 'Live price', fundamentals: 'Fundamentals',
+      advice: 'Holding review', screen: 'Stock screen', realtime: 'Live price', fundamentals: 'Fundamentals',
       general_finance: 'Explainer', out_of_scope: 'Out of scope',
     };
     let conversation = [];
@@ -252,7 +252,8 @@
         const head = lines[0];
         const body = lines.slice(1);
         if (/^This is research, not investment advice/.test(block)) { root.append(inline(block, el('p', 'disclaimer'))); return; }
-        if (index === 0 && /: review$/.test(head)) {
+        // Code-rendered answers (holding review, stock screen) open with a title line.
+        if (index === 0 && (/: review$/.test(head) || head === 'Long-term quality screen')) {
           root.append(el('h3', '', head.replace(/: review$/, '')));
           if (body.length) root.append(inline(body.join(' '), el('p', 'lede')));
           return;

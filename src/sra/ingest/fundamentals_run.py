@@ -1,13 +1,13 @@
 """Ingest NSE/BSE fundamental research from Upstox's Fundamentals API."""
 
 import logging
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sra.db import connect
+from sra.figures import period_start
 from sra.upstox.client import UpstoxAuthError, UpstoxClient, UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
 
@@ -46,10 +46,6 @@ SET value = EXCLUDED.value,
 # stopped full-universe run continues instead of starting over.
 RESUME_WINDOW_SECONDS = 3600
 
-_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
-           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")  # fmt: skip
-_PERIOD_LABEL = re.compile(r"^([A-Z][a-z]{2}) ([0-9]{4})$")
-
 
 @dataclass(frozen=True)
 class FundamentalsIngestReport:
@@ -76,18 +72,6 @@ def _parse_ratio_value(raw: str | None) -> float | None:
         return float(raw.strip().rstrip("%"))
     except ValueError:
         return None
-
-
-def _period_end(label: str) -> date | None:
-    """'Mar 2026' -> 2026-03-01 (first of the month, for ordering); else None.
-
-    Matches the migration's backfill. Month names are looked up rather than
-    parsed with strptime, whose %b depends on the process locale.
-    """
-    match = _PERIOD_LABEL.match(label)
-    if match is None or match.group(1) not in _MONTHS:
-        return None
-    return date(int(match.group(2)), _MONTHS.index(match.group(1)) + 1, 1)
 
 
 def _data(payload: Any, expected: type[list[Any]] | type[dict[str, Any]]) -> Any:
@@ -128,7 +112,7 @@ def _financial_row(
         "time_period": time_period,
         "category": category,
         "period": period,
-        "period_end": _period_end(period),
+        "period_end": period_start(period),
         "value": value,
     }
 

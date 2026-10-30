@@ -160,6 +160,7 @@ def _research_summary(answer: Answer) -> dict[str, Any]:
         "fundamentals": "NSE/BSE fundamentals database.",
         "general_finance": "General finance explanation; no market data used.",
         "advice": "Holding review from live quote and fundamentals; no verdict.",
+        "screen": "Fundamentals screen with stated tests; not a buy list.",
         "out_of_scope": "Scope check; no market data used.",
     }[route]
     return {

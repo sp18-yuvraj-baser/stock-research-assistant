@@ -6,12 +6,12 @@ from typing import Any, ClassVar
 
 import pytest
 
+from sra.figures import period_start
 from sra.ingest import fundamentals_run
 from sra.ingest.fundamentals_run import (
     _balance_sheet_rows,
     _income_statement_rows,
     _parse_ratio_value,
-    _period_end,
     _ratio_rows,
     ingest_fundamentals,
 )
@@ -120,7 +120,7 @@ def test_balance_sheet_rows_pivots_flat_history_into_categories() -> None:
     ],
 )
 def test_period_end(label: str, expected: date | None) -> None:
-    assert _period_end(label) == expected
+    assert period_start(label) == expected
 
 
 def test_rows_carry_period_end_for_upstox_labels() -> None:

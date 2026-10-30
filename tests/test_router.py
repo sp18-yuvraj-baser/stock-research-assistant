@@ -37,7 +37,6 @@ def test_fundamentals_questions_use_the_indian_equity_path(question: str) -> Non
         "Should I buy TCS?",
         "Is ABCIND a good investment right now?",
         "What is TCS's price target?",
-        "Which Indian stock should I pick?",
         "I have 100 hdfc bank stocks, should I keep or sell them?",
         "Should I keep my TCS shares?",
         "What should I do with my 50 INFY shares?",
@@ -167,3 +166,38 @@ def test_a_lone_everyday_word_does_not_make_a_company_question() -> None:
         route_question(question, names_company=True, company_certain=True).route
         is Route.FUNDAMENTALS
     )
+
+
+def test_a_price_the_user_paid_is_not_a_quote_request() -> None:
+    question = "I had purchased the shares at the price of 709"
+    assert route_question(question).route is not Route.REALTIME
+    assert route_question("What's the price of reliance?").route is Route.REALTIME
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "suggest me some stocks for long term investment",
+        "Which Indian stock should I pick?",
+        "best stocks to buy now",
+        "recommend good stocks for 5 years",
+        "which shares should I buy today?",
+        "konse stocks lu",
+    ],
+)
+def test_asking_for_a_list_of_stocks_gets_the_screen(question: str) -> None:
+    assert route_question(question).route is Route.SCREEN
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("Is TCS a good stock?", Route.ADVICE),
+        ("I own some TCS shares, should I sell?", Route.ADVICE),
+        ("what are blue chip stocks?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_one_company_or_a_definition_is_not_a_screen(
+    question: str, route: Route
+) -> None:
+    assert route_question(question).route is route

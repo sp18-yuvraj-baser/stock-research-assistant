@@ -47,16 +47,24 @@ them?" and "Assistant: HDFC BANK LTD (HDFCBANK): review ...":
   "and its live price" -> What is HDFCBANK's live price?
   "I bought them at 1500" -> I have 100 HDFCBANK shares bought at 1500,
     should I keep or sell them?
+  "I had purchased the shares at the price of 709" -> I have 100 HDFCBANK
+    shares bought at 709, should I keep or sell them?
   "what is ROE?" -> what is ROE?
 """
 
 # Words that point back at the conversation. A message with none of them is
 # answered as typed: the small model otherwise "helpfully" ties "What is
 # ROE?" to the last company discussed, and skipping it saves a model call.
+# Besides pronouns, that means "the shares"/"the stock" and a detail added to
+# a holding already described ("I bought at 709", "my average is 650").
 _REFERS_BACK = re.compile(
     r"\b(it|its|it's|them|they|their|this|that|these|those|he|she|above|same"
     r"|previous|earlier|last|again|also|too|instead|else|more|why|how come"
-    r"|what about|how about|and|then|so|compare|vs|versus|both|either|other)\b",
+    r"|what about|how about|and|then|so|compare|vs|versus|both|either|other)\b"
+    r"|\bthe (shares?|stocks?|company|holding|position|investment)\b"
+    r"|\b(bought|purchased|paid|acquired|got)\b.{0,30}\b(at|for|@)\s*"
+    r"(rs\.?|inr|₹)?\s*\d"
+    r"|\bmy (buy(ing)?|purchase|average|avg|cost)( price)?\b",
     re.IGNORECASE,
 )
 

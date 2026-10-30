@@ -91,3 +91,21 @@ def test_ask_routes_and_answers_the_rewritten_question(
     assert answer.question == "reply to above question"
     assert answer.standalone == rewrite
     assert answer.route.value == "advice"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "I had purchased the shares at the price of 709",
+        "I bought at 650",
+        "my average price is 720",
+        "what is the stock trading at?",
+    ],
+)
+def test_a_detail_about_the_holding_is_treated_as_a_follow_up(
+    monkeypatch: pytest.MonkeyPatch, message: str
+) -> None:
+    rewrite = "I have 100 HDFCBANK shares bought at 709, should I keep them?"
+    prompts = _model_says(monkeypatch, rewrite)
+    assert standalone_question(message, HISTORY) == rewrite
+    assert len(prompts) == 1

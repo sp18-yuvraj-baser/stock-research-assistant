@@ -10,7 +10,7 @@ alone first, so no path ever sees earlier turns.
 
 from dataclasses import dataclass
 
-from sra.agent import holding
+from sra.agent import holding, screen
 from sra.agent.followup import Turn, standalone_question
 from sra.agent.loop import (
     PathResult,
@@ -86,6 +86,10 @@ def ask(
         # Rendered in code, not by the model: it never gives a verdict, and
         # every figure and comparison in it is computed.
         answer.path = holding.review(question)
+    elif routing.route is Route.SCREEN:
+        # Also code-rendered: a list of stocks must come from stated tests on
+        # real data, never from a model's memory of "good stocks".
+        answer.path = screen.run(question)
     else:
         answer.path = _MODEL_PATHS[routing.route](question, **kwargs)
     answer.text = answer.path.text
