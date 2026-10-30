@@ -266,3 +266,19 @@ def test_portfolio_and_tax_intents(question: str, route: Route) -> None:
 )
 def test_discovery_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("latest news on TCS", Route.NEWS),
+        ("market headlines", Route.NEWS),
+        ("TCS announcements", Route.ANNOUNCEMENTS),
+        ("insider trading disclosures", Route.ANNOUNCEMENTS),
+        ("results announced today", Route.ANNOUNCEMENTS),
+        ("upcoming results calendar", Route.ANNOUNCEMENTS),
+        ("TCS latest quarterly results", Route.RESULTS),
+    ],
+)
+def test_news_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route

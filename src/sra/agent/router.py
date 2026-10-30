@@ -22,6 +22,8 @@ class Route(StrEnum):
     PORTFOLIO = "portfolio"
     TAX = "tax"
     DISCOVER = "discover"
+    NEWS = "news"
+    ANNOUNCEMENTS = "announcements"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -97,6 +99,12 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
         "Stored fundamentals and sectors, filtered in code.",
         titled=True,
     ),
+    Route.NEWS: RouteInfo(
+        "News", "Google News / Economic Times headlines, as published.", titled=True
+    ),
+    Route.ANNOUNCEMENTS: RouteInfo(
+        "BSE filings", "BSE announcements stored from its public feed.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -160,6 +168,27 @@ INTENTS: tuple[Intent, ...] = (
             r"\b(most active|top movers)\b",
             r"\bis (the )?market (open|closed)\b",
             r"\b(stock |share )?market (holidays?|hours|timings)\b",
+        ),
+    ),
+    Intent(
+        Route.ANNOUNCEMENTS,
+        (
+            r"\bannouncements?\b",
+            r"\b(filings?|disclosures?)\b",
+            r"\bboard meetings?\b",
+            r"\binsider (trading|buying|selling|deals?|disclosures?)\b",
+            r"\bresults? (announced|declared|filed|out) (today|this week)\b",
+            r"\b(upcoming|this week'?s?) results\b",
+            r"\b(results|earnings) calendar\b",
+            r"\b(earnings call|concall|conference call) transcripts?\b",
+        ),
+    ),
+    Intent(
+        Route.NEWS,
+        (
+            r"\bnews\b",
+            r"\bheadlines?\b",
+            r"\bwhat'?s (happening|going on) (with|in|at)\b",
         ),
     ),
     Intent(Route.COMPARE, (r"\bcompare\b", r"\b(vs\.?|versus)\b")),

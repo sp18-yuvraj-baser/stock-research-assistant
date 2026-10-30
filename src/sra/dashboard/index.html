@@ -90,6 +90,8 @@
     .disclaimer { margin:6px 0 0; padding-top:10px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--muted) }
 
     details.trace { font-size:12.5px; color:var(--muted) }
+    a.source { font-size:12px; color:var(--brand); margin-left:4px; white-space:nowrap }
+    a.source::after { content:" ↗" }
     .chart { margin:14px 0 0; padding:10px 12px 8px; border:1px solid var(--line); border-radius:10px }
     .chart figcaption { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px }
     .chart svg { width:100%; height:auto; display:block }
@@ -210,7 +212,25 @@
       [/(sector figure looks unreliable|not meaningful)/, 'warn'],
       [/(in line with sector|no sector figure)/, 'neutral'],
     ];
+    // https links (news, BSE filings) become anchors labelled by host; the
+    // href is the server's text, set as an attribute, never parsed as HTML.
     function inline(text, parent) {
+      for (const piece of text.split(/(https:\/\/[^\s<>"]+)/)) {
+        if (!piece) continue;
+        if (/^https:\/\//.test(piece)) {
+          const link = el('a', 'source', new URL(piece).hostname.replace(/^www\./, ''));
+          link.href = piece;
+          link.target = '_blank';
+          link.rel = 'noopener noreferrer';
+          parent.append(link);
+        } else {
+          inlineText(piece, parent);
+        }
+      }
+      return parent;
+    }
+
+    function inlineText(text, parent) {
       const parts = text.split(/(\*\*[^*]+\*\*)/);
       for (const part of parts) {
         if (!part) continue;

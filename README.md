@@ -58,6 +58,19 @@ sra upstox ingest-fundamentals --all
 Upstox may not return every ratio for every company. Missing or unavailable
 provider data stays visible as a gap; the assistant does not infer it.
 
+Each fundamentals refresh also stores cash flow, the company's sector label
+and its recent corporate actions (dividends), which sector lists, peers and
+dividend-yield lists use.
+
+BSE corporate announcements (results, board meetings, insider disclosures,
+transcripts, annual reports) come from BSE's public feed, which only covers
+the current day. Store them regularly, for example hourly from cron:
+
+```bash
+sra ingest announcements
+# crontab: 0 * * * * cd /path/to/repo && .venv/bin/sra ingest announcements
+```
+
 ## Use
 
 Run the local chat:

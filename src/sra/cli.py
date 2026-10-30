@@ -7,6 +7,8 @@ from pydantic import ValidationError
 from sra.agent.compose import ask
 from sra.agent.loop import OllamaError
 from sra.config import configure_logging, settings
+from sra.feeds import FeedError
+from sra.ingest.announcements_run import ingest_announcements
 from sra.ingest.fundamentals_run import FundamentalsIngestReport, ingest_fundamentals
 from sra.ingest.instruments_run import ingest_all_indian_equities, ingest_instruments
 from sra.migrate import apply_migrations
@@ -70,6 +72,15 @@ def _cmd_upstox_ingest_instruments(args: argparse.Namespace) -> int:
             f"stored under a different instrument key: {names}",
             file=sys.stderr,
         )
+    return 0
+
+
+def _cmd_ingest_announcements(_args: argparse.Namespace) -> int:
+    report = ingest_announcements()
+    print(
+        f"{report.seen} announcements in the feed, {report.stored} new, "
+        f"{report.unmapped} without a matching ISIN"
+    )
     return 0
 
 
@@ -201,6 +212,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     upstox_fund.set_defaults(func=_cmd_upstox_ingest_fundamentals, resumable=True)
 
+    ingest = sub.add_parser("ingest", help="store free daily feeds (run from cron)")
+    ingest_sub = ingest.add_subparsers(dest="ingest_command", required=True)
+    ingest_sub.add_parser(
+        "announcements",
+        help="store BSE's latest corporate announcements (covers about a day)",
+    ).set_defaults(func=_cmd_ingest_announcements)
+
     return parser
 
 
@@ -220,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         OllamaError,
         UpstoxError,
         UnknownInstrumentError,
+        FeedError,
     ) as exc:
         # An unreachable local model is the most common setup failure; a
         # traceback tells the user nothing they can act on.
