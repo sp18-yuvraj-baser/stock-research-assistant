@@ -2,9 +2,9 @@ from collections.abc import Callable
 
 import pytest
 
-from sra.agent import compose, holding
+from sra.agent import compose
+from sra.agent.companies import Resolution
 from sra.agent.compose import OUT_OF_SCOPE, ask
-from sra.agent.holding import Resolution
 from sra.agent.loop import PathResult
 from sra.agent.router import Route
 from sra.upstox.instruments import EquityInstrument
@@ -61,7 +61,7 @@ def _resolves(
         looked_up.append(question)
         return Resolution(list(companies), [])
 
-    monkeypatch.setattr(holding, "resolve_companies", fake)
+    monkeypatch.setattr(compose, "resolve_companies", fake)
     return looked_up
 
 

@@ -66,12 +66,15 @@ SCOPE
   Decline requests for investment advice, price predictions, or buy/sell/hold
   recommendations.
 
-  get_live_quote returns only the last price. It never returns today's
-  volume, day change %, 52-week high/low, or any other quote field -- if
-  asked for one of those, say plainly that this tool only tracks last price,
-  rather than omitting the question or guessing a value.
+  get_live_quote returns the last price plus, when Upstox has them, today's
+  change from the previous close, the day's range, today's volume and the
+  circuit limits. Report only those fields, exactly as returned. It has no
+  52-week range, returns over time, market cap or news; if asked, say that
+  a separate question ("TCS 52 week high", "TCS 1 year return") covers the
+  first two and that the rest is not covered here.
 
-Answer in one sentence: ticker, exchange, last price in INR, and the IST time.
+Answer in at most two sentences: ticker, exchange, last price in INR, the IST
+time, and today's change; add range or volume only when asked.
 """
 
 LIVE_QUOTE_TOOL = {

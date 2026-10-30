@@ -11,7 +11,8 @@ alone first, so no path ever sees earlier turns.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sra.agent import holding, screen
+from sra.agent import history, holding, market, screen
+from sra.agent.companies import resolve_companies
 from sra.agent.followup import Turn, standalone_question
 from sra.agent.loop import (
     PathResult,
@@ -71,7 +72,7 @@ def ask(
     # symbol, so the regexes alone send it to the tool-less path. One indexed
     # lookup tells whether the question names a listed company.
     if routing.route is Route.GENERAL_FINANCE:
-        found = holding.resolve_companies(question)
+        found = resolve_companies(question)
         if found.companies:
             routing = route_question(
                 question, names_company=True, company_certain=found.confident
@@ -97,6 +98,8 @@ def ask(
 CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
     Route.ADVICE: holding.review,
     Route.SCREEN: screen.run,
+    Route.HISTORY: history.answer,
+    Route.MARKET: market.answer,
 }
 
 _MODEL_PATHS = {

@@ -183,7 +183,7 @@ def test_an_auth_failure_rebuilds_the_shared_client(
         "sra.tools.get_live_quote.lookup_instrument", lambda _t, **_: _TCS
     )
     monkeypatch.setattr(
-        "sra.tools.get_live_quote.shared_client",
+        "sra.upstox.market.shared_client",
         lambda: _FakeClient(error=UpstoxAuthError("token expired")),
     )
     monkeypatch.setattr(
@@ -201,3 +201,27 @@ def test_quote_text_gives_the_time_in_ist() -> None:
     text = quote.to_text()
     assert "TCS (NSE): last price 2475.2 INR at 29 Oct 2026, 13:39 IST" in text
     assert "+00:00" not in text and "UTC" not in text
+
+
+def test_quote_carries_todays_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sra.tools.get_live_quote.lookup_instrument", lambda _t, **_: _TCS
+    )
+    payload = {
+        "data": {
+            "NSE_EQ:TCS": {
+                "instrument_token": _KEY,
+                "last_price": 2478.0,
+                "net_change": 18.0,
+                "ohlc": {"open": 2490.0, "high": 2509.5, "low": 2464.0},
+                "volume": 3427569,
+                "lower_circuit_limit": 2407.5,
+                "upper_circuit_limit": 2556.3,
+            }
+        }
+    }
+    text = get_live_quote("TCS", client=_FakeClient(payload=payload)).to_text()
+    assert "Change today: +18.00 INR (+0.73%) from previous close 2460.00 INR." in text
+    assert "Day range: 2464.0 to 2509.5 INR." in text
+    assert "Volume today: 3,427,569 shares." in text
+    assert "Circuit limits: 2407.50 to 2556.30 INR." in text

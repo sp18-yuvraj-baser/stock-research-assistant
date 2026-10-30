@@ -1,15 +1,17 @@
 import time
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
 import psycopg
 import pytest
 
-from sra.agent import holding
+from sra.agent import companies, holding
 from sra.agent.holding import DISCLAIMER, NO_COMPANY, Position, parse_position
 from sra.tools.get_live_quote import LiveQuote
 from sra.tools.run_sql import SqlResult
 from sra.upstox.instruments import EquityInstrument
+from sra.upstox.market import Candle
 
 INSTRUMENTS = [
     {"ticker": "HDFCBANK", "name": "HDFC BANK LTD"},
@@ -75,6 +77,16 @@ class FakeData:
             rows = self.financials
         return SqlResult(sql=sql, rows=rows)
 
+    def daily_candles(self, key: str, **_: object) -> list[Candle]:
+        # A year of closes rising from 500 to 700, so the range and return are
+        # known exactly.
+        start = date.today() - timedelta(days=399)
+        closes = [500 + d * 200 / 399 for d in range(400)]
+        return [
+            Candle(start + timedelta(days=d), c, c, c, c, 1)
+            for d, c in enumerate(closes)
+        ]
+
     def get_live_quote(self, ticker: str, *, exchange: str | None = None) -> LiveQuote:
         self.quotes.append(f"{ticker}:{exchange}")
         return LiveQuote(
@@ -86,8 +98,9 @@ class FakeData:
 def data(monkeypatch: pytest.MonkeyPatch) -> FakeData:
     fake = FakeData()
     monkeypatch.setattr(holding, "run_sql", fake.run_sql)
-    monkeypatch.setattr(holding, "match_instruments", fake.match_instruments)
+    monkeypatch.setattr(companies, "match_instruments", fake.match_instruments)
     monkeypatch.setattr(holding, "get_live_quote", fake.get_live_quote)
+    monkeypatch.setattr(holding, "daily_candles", fake.daily_candles)
     return fake
 
 
@@ -150,6 +163,8 @@ def test_review_renders_every_section_with_computed_figures(data: FakeData) -> N
     assert "Live price: ₹682.50 (NSE, 29 Oct 2026, 12:32 IST)" in text
     assert "Your 100 shares: ₹68,250.00" in text
     assert "unrealised gain ₹8,250.00 (+13.75%)" in text
+    assert "(price is 2.5% below the high)" in text
+    assert "1-year price return:" in text
     assert "P/E 13.01 vs sector 0.32 (sector figure looks unreliable)" in text
     assert "P/B 1.8 vs sector 1.46: pricier than sector" in text
     assert "Net NPA 0.38% vs sector 0.79%: better than sector (lower is better)" in text
@@ -288,8 +303,8 @@ def test_a_common_word_matching_a_name_is_named_not_reviewed(data: FakeData) -> 
 def test_company_names_and_aliases_resolve(
     data: FakeData, question: str, ticker: str
 ) -> None:
-    companies = holding.resolve_companies(question).companies
-    assert [c.ticker for c in companies] == [ticker]
+    found = companies.resolve_companies(question).companies
+    assert [c.ticker for c in found] == [ticker]
 
 
 def test_parsing_a_huge_number_run_stays_fast() -> None:
@@ -299,7 +314,7 @@ def test_parsing_a_huge_number_run_stays_fast() -> None:
 
 
 @pytest.mark.parametrize(
-    ("question", "companies", "set_aside"),
+    ("question", "expected", "set_aside"),
     [
         # A lowercase everyday word that is also a ticker loses to the company
         # the user plainly named, and is reported rather than reviewed.
@@ -317,16 +332,16 @@ def test_parsing_a_huge_number_run_stays_fast() -> None:
     ],
 )
 def test_weak_and_ambiguous_matches_are_set_aside(
-    data: FakeData, question: str, companies: list[str], set_aside: list[str]
+    data: FakeData, question: str, expected: list[str], set_aside: list[str]
 ) -> None:
-    found = holding.resolve_companies(question)
-    assert [c.ticker for c in found.companies] == companies
+    found = companies.resolve_companies(question)
+    assert [c.ticker for c in found.companies] == expected
     assert [c.ticker for c in found.set_aside] == set_aside
     assert found.confident
 
 
 def test_a_lone_lowercase_word_is_not_confident(data: FakeData) -> None:
-    found = holding.resolve_companies("How is the global economy doing?")
+    found = companies.resolve_companies("How is the global economy doing?")
     assert [c.ticker for c in found.companies] == ["GLOBAL"]
     assert not found.confident
 

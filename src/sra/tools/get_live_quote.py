@@ -1,5 +1,4 @@
 import logging
-import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -8,13 +7,9 @@ from zoneinfo import ZoneInfo
 import psycopg
 
 from sra.db import connect
-from sra.upstox.client import (
-    UpstoxAuthError,
-    UpstoxError,
-    reset_shared_client,
-    shared_client,
-)
+from sra.upstox.client import UpstoxAuthError, UpstoxError, reset_shared_client
 from sra.upstox.instruments import UnknownInstrumentError, lookup_instrument
+from sra.upstox.market import FullQuote, full_quotes
 
 log = logging.getLogger(__name__)
 
@@ -47,16 +42,36 @@ class LiveQuote:
     last_price: float | None
     fetched_at: str  # ISO 8601 UTC, set by this call -- never trusted from the payload
     error: str | None = None
+    # Today's session so far: change, range, volume, circuit limits.
+    details: FullQuote | None = None
 
     def to_text(self) -> str:
         if self.error:
             return f"ERROR: {self.error}"
         exchange = self.exchange.removesuffix("_EQ")
-        return (
+        lines = [
             f"{self.ticker} ({exchange}): last price {self.last_price} INR at "
             f"{ist_time(self.fetched_at)}. This is a live NSE/BSE quote from "
             "Upstox, valid only at that moment."
-        )
+        ]
+        quote = self.details
+        if quote is not None:
+            if quote.net_change is not None and quote.change_pct is not None:
+                lines.append(
+                    f"Change today: {quote.net_change:+.2f} INR "
+                    f"({quote.change_pct:+.2f}%) from previous close "
+                    f"{quote.previous_close:.2f} INR."
+                )
+            if quote.low is not None and quote.high is not None:
+                lines.append(f"Day range: {quote.low} to {quote.high} INR.")
+            if quote.volume is not None:
+                lines.append(f"Volume today: {quote.volume:,} shares.")
+            if quote.lower_circuit is not None and quote.upper_circuit is not None:
+                lines.append(
+                    f"Circuit limits: {quote.lower_circuit:.2f} to "
+                    f"{quote.upper_circuit:.2f} INR."
+                )
+        return "\n".join(lines)
 
 
 def _log_quote(instrument_key: str, last_price: float | None, fetched_at: str) -> None:
@@ -72,29 +87,6 @@ def _log_quote(instrument_key: str, last_price: float | None, fetched_at: str) -
             conn.commit()
     except psycopg.Error as exc:
         log.warning("could not log quote for %s: %s", instrument_key, exc)
-
-
-def _price_from(payload: Any, instrument_key: str) -> float | None:
-    """The finite last price for instrument_key, or None if the payload has none."""
-    # Upstox keys the response by "SEGMENT:TRADING_SYMBOL" (e.g. "NSE_EQ:TCS"),
-    # not by the instrument_key used to request it -- the instrument_key comes
-    # back inside each entry as instrument_token instead. One instrument_key
-    # is requested per call, so match on instrument_token rather than assume
-    # a key format that isn't documented to be stable.
-    entries = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(entries, dict):
-        return None
-    for entry in entries.values():
-        if isinstance(entry, dict) and entry.get("instrument_token") == instrument_key:
-            raw = entry.get("last_price")
-            if raw is None:
-                return None
-            try:
-                price = float(raw)
-            except (TypeError, ValueError):
-                return None
-            return price if math.isfinite(price) else None
-    return None
 
 
 def get_live_quote(
@@ -119,9 +111,7 @@ def get_live_quote(
 
     instrument_key, resolved_exchange = listing.instrument_key, listing.exchange
     try:
-        payload = (client or shared_client()).get_json(
-            "/v2/market-quote/ltp", params={"instrument_key": instrument_key}
-        )
+        quote = full_quotes([instrument_key], client=client).get(instrument_key)
     except UpstoxError as exc:
         if isinstance(exc, UpstoxAuthError) and client is None:
             # The shared client holds the rejected token; rebuild it so the
@@ -131,8 +121,7 @@ def get_live_quote(
             ticker, instrument_key, resolved_exchange, None, fetched_at, error=str(exc)
         )
 
-    last_price = _price_from(payload, instrument_key)
-    if last_price is None:
+    if quote is None:
         return LiveQuote(
             ticker,
             instrument_key,
@@ -141,5 +130,12 @@ def get_live_quote(
             fetched_at,
             error=f"Upstox returned no usable price for {instrument_key}",
         )
-    _log_quote(instrument_key, last_price, fetched_at)
-    return LiveQuote(ticker, instrument_key, resolved_exchange, last_price, fetched_at)
+    _log_quote(instrument_key, quote.last_price, fetched_at)
+    return LiveQuote(
+        ticker,
+        instrument_key,
+        resolved_exchange,
+        quote.last_price,
+        fetched_at,
+        details=quote,
+    )

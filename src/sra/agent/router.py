@@ -14,6 +14,8 @@ from typing import NamedTuple
 class Route(StrEnum):
     ADVICE = "advice"
     SCREEN = "screen"
+    HISTORY = "history"
+    MARKET = "market"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -55,6 +57,10 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.SCREEN: RouteInfo(
         "Stock screen", "Fundamentals screen with stated tests; not a buy list."
     ),
+    Route.HISTORY: RouteInfo(
+        "Price history", "Upstox daily prices and live quote; returns computed."
+    ),
+    Route.MARKET: RouteInfo("Market", "Live index and stock quotes from Upstox."),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -70,7 +76,7 @@ class Intent:
 
     Checked in INTENTS order after the out-of-scope check and before the
     screen/advice/model routes. Definitions ("what is a 52 week high?") stay
-    education unless the intent explicitly answers them.
+    education unless unless_education is False.
     """
 
     route: Route
@@ -79,8 +85,35 @@ class Intent:
     unless_holding: bool = False
 
 
-# Ordered: earlier intents win. Feature phases add to this.
-INTENTS: tuple[Intent, ...] = ()
+# Ordered: earlier intents win.
+INTENTS: tuple[Intent, ...] = (
+    # Before market: "Nifty 1 year return" is history, not today's level.
+    Intent(
+        Route.HISTORY,
+        (
+            r"52.?(week|wk)",
+            r"\b(\d+|one|two|three|five|six|ten) ?(years?|yrs?|y|months?|m)\b.{0,20}"
+            r"\b(returns?|performance|gain|change)\b",
+            r"\breturns? (of|for|on|from)\b",
+            r"\b(price )?(chart|graph)\b",
+            r"\bprice history\b",
+            r"\bhow (much )?(has|did) .{0,40}\b(moved|risen|fallen|grown|gained|lost"
+            r"|performed)\b",
+        ),
+    ),
+    Intent(
+        Route.MARKET,
+        (
+            r"\bhow('s| is| was)? (the )?(indian |stock |share )?markets?\b(?! cap)",
+            r"\bmarket (today|update|overview|summary|mood|now)\b",
+            r"\b(nifty|sensex|bank ?nifty|finnifty|india vix)\b",
+            r"\b(top )?(gainers|losers)\b",
+            r"\b(most active|top movers)\b",
+            r"\bis (the )?market (open|closed)\b",
+            r"\b(stock |share )?market (holidays?|hours|timings)\b",
+        ),
+    ),
+)
 
 
 # Asking what to do about a stock is always answered with a holding review,
@@ -226,7 +259,8 @@ _GENERAL_FINANCE = (
     r"beta|book value|enterprise value|free cash flow|expense ratio|"
     r"stock split|bonus share|rights issue|ipo|mutual fund|etf|index fund|"
     r"bull market|bear market|support|resistance|stop loss|portfolio|"
-    r"diversification|volatility|liquidity|inflation|interest rates?)\b",
+    r"diversification|volatility|liquidity|inflation|interest rates?|"
+    r"52.?week (high|low)|circuit limit|upper circuit|lower circuit)\b",
     r"\b(how (does|do|is|are)|explain|define|difference between)\b.{0,80}\b"
     r"(roe|roce|roa|p/?e|p/?b|eps|ebitda|market cap|dividend yield|"
     r"stock market|share market|mutual fund|etf|index fund|stock split|"
@@ -268,10 +302,12 @@ def route_question(
             Route.OUT_OF_SCOPE, tuple(f"outside_india:{item}" for item in foreign)
         )
 
-    education_cue = bool(_matches(text, _EDUCATION))
+    # Intents step aside only for real definitions ("what is a 52 week
+    # high?"), not every "how" ("how is the market today?").
+    definition_cue = bool(re.search(_DEFINITION, text, re.IGNORECASE))
     holding_cue = bool(_matches(text, _HOLDING))
     for intent in INTENTS:
-        if intent.unless_education and education_cue:
+        if intent.unless_education and definition_cue:
             continue
         if intent.unless_holding and holding_cue:
             continue

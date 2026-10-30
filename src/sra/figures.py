@@ -48,3 +48,8 @@ def to_decimal(value: object) -> Decimal | None:
 
 def pct_change(prior: Decimal, current: Decimal) -> Decimal:
     return (100 * (current - prior) / prior).quantize(Decimal("0.01"))
+
+
+def rupees(value: Decimal | float) -> str:
+    """₹ with thousands separators and paise, e.g. '₹68,250.00'."""
+    return f"₹{Decimal(str(value)):,.2f}"

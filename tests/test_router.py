@@ -201,3 +201,22 @@ def test_one_company_or_a_definition_is_not_a_screen(
     question: str, route: Route
 ) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("TCS 52 week high", Route.HISTORY),
+        ("Infosys 1 year return", Route.HISTORY),
+        ("chart of reliance over 5 years", Route.HISTORY),
+        ("Nifty 50 1 year return", Route.HISTORY),
+        ("how has HDFC Bank performed this year?", Route.HISTORY),
+        ("How is the market today?", Route.MARKET),
+        ("top gainers today", Route.MARKET),
+        ("is the market open?", Route.MARKET),
+        ("What is a 52 week high?", Route.GENERAL_FINANCE),
+        ("how does the stock market work?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_market_data_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route

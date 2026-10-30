@@ -11,17 +11,18 @@ answer.
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-import psycopg
-
+from sra.agent.companies import resolve_companies
+from sra.agent.history import price_stats
 from sra.agent.loop import PathResult
-from sra.figures import months_between, pct_change, period_start, to_decimal
+from sra.figures import months_between, pct_change, period_start, rupees, to_decimal
 from sra.tools.get_live_quote import LiveQuote, get_live_quote, ist_time
 from sra.tools.run_sql import SqlResult, run_sql
-from sra.upstox.instruments import EquityInstrument, match_instruments
+from sra.upstox.client import UpstoxError
+from sra.upstox.market import daily_candles
 
 DISCLAIMER = (
     "This is research, not investment advice. For a personal recommendation, "
@@ -38,45 +39,6 @@ valuation against its sector and its profit trend.
 {DISCLAIMER}"""
 
 
-# Words that occur in holding questions but never start or end a company
-# name in them. Without this, "time" resolves to TIME TECHNOPLAST and "idea"
-# to VODAFONE IDEA.
-_STOPWORDS = frozenset(
-    """
-    i me my we our you your it its is am are was be been have has had do
-    does did should shall can could would will must may a an the and or but
-    if of to in on at for with from by about into as than then so this that
-    these those them they their there here what which who how when why where
-    any some all keep hold holding holdings sell buy exit add book booking
-    profit profits loss losses average accumulate continue stay avoid invest
-    investment investing own owned bought buying selling purchase share
-    shares stock stocks equity position portfolio advice suggest suggestion
-    suggestions thoughts review now today right good bad wise safe better
-    time long term short price target market value worth go up down rise
-    fall get out year years month months rs inr crore lakh quantity qty plan
-    lot more less trim ok okay please tell think idea view also just still
-    yet already nse bse kya mujhe mere paas hai ka ki ke ya karu karun karna
-    kar du dun chahiye rakhu rakhna bechu bechna nikal lena sahi abhi mein
-    """.split()  # noqa: SIM905 -- a word list reads better as prose
-)
-
-# Longest company name, in words, worth matching ("state bank of india").
-_MAX_NGRAM = 4
-
-# Everyday names that are neither the NSE symbol nor the start of the listed
-# name ("SBI" is SBIN, "L&T" is LARSEN & TOUBRO, Zomato is now ETERNAL).
-_ALIASES = {
-    "sbi": "SBIN",
-    "l&t": "LT",
-    "lnt": "LT",
-    "zomato": "ETERNAL",
-    "hul": "HINDUNILVR",
-    "airtel": "BHARTIARTL",
-    "kotak bank": "KOTAKBANK",
-    "ril": "RELIANCE",
-}
-
-# Digit runs are bounded so a pathological message cannot make matching slow.
 _NUMBER = r"(\d[\d,]{0,15}(?:\.\d{1,4})?)"
 _CURRENCY = r"(?:rs\.?|inr|₹)?\s*"
 _QUANTITY = (
@@ -172,105 +134,6 @@ def parse_position(question: str) -> Position:
     return Position(
         quantity=next(iter(quantities), None), buy_price=next(iter(prices), None)
     )
-
-
-def _candidate_phrases(question: str) -> list[tuple[range, str]]:
-    """Word n-grams that could name a company, longest first, with positions."""
-    words = re.findall(r"[a-z0-9&]+", question.lower())
-    phrases: list[tuple[range, str]] = []
-    for size in range(min(_MAX_NGRAM, len(words)), 0, -1):
-        for start in range(len(words) - size + 1):
-            gram = words[start : start + size]
-            if gram[0] in _STOPWORDS or gram[-1] in _STOPWORDS:
-                continue
-            if gram[0].isdigit():
-                continue
-            phrases.append((range(start, start + size), " ".join(gram)))
-    return phrases
-
-
-@dataclass(frozen=True)
-class Resolution:
-    companies: list[EquityInstrument]
-    # Several listed names start with the phrase and none was named exactly.
-    ambiguous: list[EquityInstrument]
-    error: str | None = None
-    # Matches set aside because a stronger one was found; named in the
-    # answer so a second company is never dropped silently.
-    set_aside: list[EquityInstrument] = field(default_factory=list)
-    # The companies came from confident matches, not a lone lowercase word.
-    confident: bool = False
-
-
-def resolve_companies(question: str) -> Resolution:
-    """Find every NSE company a question names.
-
-    Longer phrases win and claim their words, so "hdfc bank" is one company,
-    not HDFC Bank plus whatever "bank" alone would match.
-    """
-    phrases = _candidate_phrases(question)
-    if not phrases:
-        return Resolution([], [])
-    keys = {phrase: _ALIASES.get(phrase, phrase.replace(" ", "").upper())
-            for _, phrase in phrases}  # fmt: skip
-    try:
-        rows = match_instruments(
-            tickers=sorted(set(keys.values())),
-            names=[p.upper() for _, p in phrases],
-            prefixes=[f"{p.upper()} %" for _, p in phrases],
-        )
-    except psycopg.Error as exc:
-        return Resolution([], [], error=str(exc).strip())
-    # A single lowercase word is weak: "global" is a ticker and "action" starts
-    # a listed name, but in "the global slowdown" or "the RBI action" neither
-    # names a company. It counts only when nothing stronger matched.
-    strong: list[EquityInstrument] = []
-    weak: list[EquityInstrument] = []
-    ambiguous: list[EquityInstrument] = []
-    claimed: set[int] = set()
-    for words, phrase in phrases:
-        if claimed.intersection(words):
-            continue
-        upper = phrase.upper()
-        exact = [c for c in rows if c.ticker == keys[phrase] or c.name == upper]
-        named = exact or [c for c in rows if c.name.startswith(f"{upper} ")]
-        if len(named) == 1:
-            found = strong if _confident(question, phrase, words) else weak
-            if named[0] not in found:
-                found.append(named[0])
-            claimed.update(words)
-        elif named:
-            ambiguous = ambiguous or sorted(named, key=lambda c: c.ticker)[:5]
-            claimed.update(words)
-    if strong:
-        others = [c for c in weak + ambiguous if c not in strong]
-        return Resolution(strong, [], set_aside=others, confident=True)
-    if weak:
-        return Resolution(weak, [], set_aside=[c for c in ambiguous if c not in weak])
-    return Resolution([], ambiguous)
-
-
-def _confident(question: str, phrase: str, words: range) -> bool:
-    """Whether a matched phrase surely names a company rather than a word.
-
-    True for several words ("hdfc bank"), a known alias ("sbi"), a symbol typed
-    in capitals ("TCS"), or a word used like a holding ("my infosys shares",
-    "the pe of infosys").
-    """
-    if len(words) > 1 or phrase in _ALIASES:
-        return True
-    if re.search(rf"\b{re.escape(phrase.upper())}\b", question):
-        return True
-    lower = question.lower()
-    word = re.escape(phrase)
-    return bool(
-        re.search(rf"\b(my|of|in|sell|buy|hold|keep)\s+{word}\b", lower)
-        or re.search(rf"\b{word}\s+(shares?|stocks?|ltd|limited)\b", lower)
-    )
-
-
-def _money(value: Decimal | float) -> str:
-    return f"₹{Decimal(str(value)):,.2f}"
 
 
 def _figure(name: str, value: Decimal) -> str:
@@ -423,12 +286,32 @@ def _describe_series(series: _Series) -> str:
     return f"{series.label}: {path}"
 
 
+def _year_lines(key: str, price: float) -> list[str]:
+    """52-week range and 1-year return; nothing when history is unavailable,
+    since the review stands without them."""
+    try:
+        stats = price_stats(daily_candles(key, years=1), price, date.today())
+    except UpstoxError:
+        return []
+    if stats is None:
+        return []
+    lines = [
+        f"52-week range: {rupees(stats.low.price)} to {rupees(stats.high.price)} "
+        f"(price is {100 * (1 - price / stats.high.price):.1f}% below the high)"
+    ]
+    year = next((total for label, total, _ in stats.returns if label == "1 year"), None)
+    if year is not None:
+        lines.append(f"1-year price return: {year:+.2f}%")
+    return lines
+
+
 def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
     if quote.last_price is None or quote.last_price <= 0:
         return [f"Live price unavailable: {quote.error or 'no valid price returned'}."]
     price = Decimal(str(quote.last_price))
     exchange = quote.exchange.removesuffix("_EQ") or "NSE"
-    lines = [f"Live price: {_money(price)} ({exchange}, {ist_time(quote.fetched_at)})"]
+    lines = [f"Live price: {rupees(price)} ({exchange}, {ist_time(quote.fetched_at)})"]
+    lines += _year_lines(quote.instrument_key, quote.last_price)
     if position.conflicting:
         lines.append(
             "Position value left out: the question gives more than one share "
@@ -437,14 +320,14 @@ def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
     if position.quantity is None:
         return lines
     value = position.quantity * price
-    lines.append(f"Your {position.quantity.normalize():f} shares: {_money(value)}")
+    lines.append(f"Your {position.quantity.normalize():f} shares: {rupees(value)}")
     if position.buy_price is not None:
         cost = position.quantity * position.buy_price
         gain = value - cost
         word = "gain" if gain >= 0 else "loss"
         lines.append(
-            f"Bought at {_money(position.buy_price)}: unrealised {word} "
-            f"{_money(abs(gain))} ({pct_change(cost, value):+}%)"
+            f"Bought at {rupees(position.buy_price)}: unrealised {word} "
+            f"{rupees(abs(gain))} ({pct_change(cost, value):+}%)"
         )
         # The live price is post-adjustment; a pre-bonus buy price is not, so
         # a 1:1 bonus alone shows as a 50% loss.
