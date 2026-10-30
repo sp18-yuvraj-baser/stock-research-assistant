@@ -31,6 +31,7 @@ class Route(StrEnum):
     OPTIONS = "options"
     SHAREHOLDING = "shareholding"
     NOT_COVERED = "not_covered"
+    WATCHLIST = "watchlist"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -135,6 +136,9 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.NOT_COVERED: RouteInfo(
         "Not covered", "No reliable free source for this.", titled=True
     ),
+    Route.WATCHLIST: RouteInfo(
+        "Watchlist", "Your saved list with live Upstox quotes.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -161,6 +165,7 @@ class Intent:
 
 # Ordered: earlier intents win.
 INTENTS: tuple[Intent, ...] = (
+    Intent(Route.WATCHLIST, (r"\bwatch ?list\b",), unless_education=False),
     Intent(
         Route.NOT_COVERED,
         (r"\bipos?\b", r"\b(bulk|block) deals?\b"),

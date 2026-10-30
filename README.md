@@ -92,10 +92,28 @@ Run the local chat:
 sra dashboard --port 8001
 ```
 
-Open <http://127.0.0.1:8001>. Ask about an NSE/BSE company, live prices,
-fundamentals, a holding you want reviewed, or general finance concepts.
-Follow-up questions keep the context of the chat; the browser holds the
-conversation and "New chat" clears it.
+Open <http://127.0.0.1:8001>. Follow-up questions keep the context of the
+chat; the browser holds the conversation and "New chat" clears it. In Chrome,
+Edge and Safari a microphone button fills the box from speech.
+
+What it answers (every figure computed in code from real data; it never
+says buy or sell):
+
+| Ask | Example |
+|---|---|
+| Live price and today's session | "What's TCS trading at right now?" |
+| Price history, 52-week range, chart | "Reliance 5 year chart", "TCS 52 week high" |
+| Market overview, top movers, holidays | "How is the market today?", "top gainers" |
+| Holding or portfolio review | "I have 100 HDFC Bank shares bought at 709, keep?", "my portfolio: 100 TCS at 3500, 50 INFY at 1400" |
+| Capital-gains tax estimate | "tax if I sell 100 TCS bought at 2000 in March 2024" |
+| Fundamentals, comparisons, results, dividends | "Compare TCS vs Infosys", "TCS latest quarterly results", "ITC dividend history" |
+| Screens, sectors, peers | "stocks with ROE above 20% and P/E below 25", "IT stocks", "peers of Infosys", "suggest stocks for long term" |
+| News and BSE filings | "latest news on TCS", "insider trading disclosures", "results announced today" |
+| Earnings calls, annual reports | "summarise TCS's latest earnings call" |
+| Calculators and worked examples | "SIP of 5000 a month for 10 years at 12%", "how is TCS's ROE calculated?" |
+| Mutual funds and options | "Parag Parikh flexi cap vs Axis large cap fund", "Nifty option chain" |
+| Watchlist | "add TCS and Infosys to my watchlist", "show my watchlist" |
+| Concepts | "What is ROE?" |
 
 The server is meant for local use and binds to `127.0.0.1` by default. It has
 no authentication, so do not expose it with `--host 0.0.0.0` on a shared

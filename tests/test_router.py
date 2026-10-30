@@ -329,3 +329,11 @@ def test_learning_intents(question: str, route: Route) -> None:
 )
 def test_funds_and_derivatives_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["show my watchlist", "add TCS to my watchlist", "remove ITC from watchlist"],
+)
+def test_watchlist_intent(question: str) -> None:
+    assert route_question(question).route is Route.WATCHLIST

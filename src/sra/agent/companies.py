@@ -38,7 +38,8 @@ _STOPWORDS = frozenset(
     competitor competitors rival rivals sector sectors company companies list
     top best gainers losers active movers market markets index tax taxes gain
     gains capital ltcg stcg screen growth margin margins debt free above below
-    under over between ratio ratios latest
+    under over between ratio ratios latest watchlist watch remove delete drop
+    track untrack
     """.split()  # noqa: SIM905 -- a word list reads better as prose
 )
 

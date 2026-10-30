@@ -27,6 +27,7 @@ from sra.agent import (
     results,
     screen,
     tax,
+    watchlist,
 )
 from sra.agent.companies import resolve_companies
 from sra.agent.followup import Turn, standalone_question
@@ -126,6 +127,7 @@ CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
     Route.OPTIONS: derivatives.options,
     Route.SHAREHOLDING: derivatives.shareholding,
     Route.NOT_COVERED: derivatives.not_covered,
+    Route.WATCHLIST: watchlist.answer,
     Route.SCREEN: screen.run,
     Route.HISTORY: history.answer,
     Route.MARKET: market.answer,
