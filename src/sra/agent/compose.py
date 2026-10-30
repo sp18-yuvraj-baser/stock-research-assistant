@@ -11,7 +11,16 @@ alone first, so no path ever sees earlier turns.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sra.agent import compare, dividends, history, holding, market, results, screen
+from sra.agent import (
+    compare,
+    dividends,
+    history,
+    market,
+    portfolio,
+    results,
+    screen,
+    tax,
+)
 from sra.agent.companies import resolve_companies
 from sra.agent.followup import Turn, standalone_question
 from sra.agent.loop import (
@@ -96,7 +105,10 @@ def ask(
 # Rendered in code, not by the model: figures, comparisons and lists of
 # stocks must come from real data and stated rules, never from sampling.
 CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
-    Route.ADVICE: holding.review,
+    # One holding gets the holding review, several the portfolio review.
+    Route.ADVICE: portfolio.answer,
+    Route.PORTFOLIO: portfolio.answer,
+    Route.TAX: tax.answer,
     Route.SCREEN: screen.run,
     Route.HISTORY: history.answer,
     Route.MARKET: market.answer,

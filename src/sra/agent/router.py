@@ -19,6 +19,8 @@ class Route(StrEnum):
     COMPARE = "compare"
     RESULTS = "results"
     DIVIDENDS = "dividends"
+    PORTFOLIO = "portfolio"
+    TAX = "tax"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -83,6 +85,12 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.DIVIDENDS: RouteInfo(
         "Dividends", "Upstox corporate actions and live price.", titled=True
     ),
+    Route.PORTFOLIO: RouteInfo(
+        "Portfolio review", "Live quotes and stored sectors; no verdict.", titled=True
+    ),
+    Route.TAX: RouteInfo(
+        "Tax estimate", "Indian capital-gains rules, dated; live price.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -109,6 +117,19 @@ class Intent:
 
 # Ordered: earlier intents win.
 INTENTS: tuple[Intent, ...] = (
+    # First: "tax if I sell my 100 TCS" is about tax, not about the holding.
+    Intent(
+        Route.TAX,
+        (
+            r"\b(ltcg|stcg|capital gains?)\b",
+            r"\btax\b.{0,40}\b(sell|selling|sold|gains?|profits?|shares?|stocks?)\b",
+            r"\b(sell|selling|sold)\b.{0,60}\btax(es)?\b",
+        ),
+    ),
+    Intent(
+        Route.PORTFOLIO,
+        (r"\bportfolio\b", r"\bmy (holdings|investments)\b", r"\bholdings?\s*:"),
+    ),
     # Before market: "Nifty 1 year return" is history, not today's level.
     Intent(
         Route.HISTORY,

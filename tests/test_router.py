@@ -70,7 +70,6 @@ def test_advice_is_always_caught(question: str) -> None:
         "What does buy or sell signal mean?",
         "Explain buy or hold strategy.",
         "How do I buy or sell shares in a demat account?",
-        "How long should I hold shares for LTCG?",
         "What is the right time to buy a stock, explained?",
         "What does bullish mean?",
         "What is a price target?",
@@ -234,4 +233,19 @@ def test_market_data_intents(question: str, route: Route) -> None:
     ],
 )
 def test_fundamentals_depth_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("How long should I hold shares for LTCG?", Route.TAX),
+        ("tax if I sell my 100 TCS bought at 3500", Route.TAX),
+        ("capital gains on selling infosys", Route.TAX),
+        ("review my portfolio: 100 TCS at 3500, 50 INFY at 1400", Route.PORTFOLIO),
+        ("my holdings: TCS 100, HDFCBANK 50", Route.PORTFOLIO),
+        ("What is a portfolio?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_portfolio_and_tax_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
