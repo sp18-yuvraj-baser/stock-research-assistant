@@ -310,3 +310,22 @@ def test_document_intents(question: str, route: Route) -> None:
 )
 def test_learning_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("NAV of parag parikh flexi cap fund", Route.FUNDS),
+        ("parag parikh flexi cap fund vs axis large cap fund", Route.FUNDS),
+        ("nippon india small cap regular plan returns", Route.FUNDS),
+        ("nifty option chain", Route.OPTIONS),
+        ("bank nifty PCR and max pain", Route.OPTIONS),
+        ("TCS shareholding pattern", Route.SHAREHOLDING),
+        ("promoter holding in reliance", Route.SHAREHOLDING),
+        ("upcoming IPOs", Route.NOT_COVERED),
+        ("bulk deals today", Route.NOT_COVERED),
+        ("What is a mutual fund?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_funds_and_derivatives_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route

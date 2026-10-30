@@ -27,6 +27,10 @@ class Route(StrEnum):
     DOCUMENTS = "documents"
     EXPLAIN = "explain"
     CALCULATOR = "calculator"
+    FUNDS = "funds"
+    OPTIONS = "options"
+    SHAREHOLDING = "shareholding"
+    NOT_COVERED = "not_covered"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -119,6 +123,18 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.CALCULATOR: RouteInfo(
         "Calculator", "Computed from the numbers you gave.", titled=True
     ),
+    Route.FUNDS: RouteInfo(
+        "Mutual fund", "AMFI NAVs and api.mfapi.in history.", titled=True
+    ),
+    Route.OPTIONS: RouteInfo(
+        "Options", "Upstox option chain, nearest expiry.", titled=True
+    ),
+    Route.SHAREHOLDING: RouteInfo(
+        "Shareholding", "BharatStock quarterly filings.", titled=True
+    ),
+    Route.NOT_COVERED: RouteInfo(
+        "Not covered", "No reliable free source for this.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -145,6 +161,37 @@ class Intent:
 
 # Ordered: earlier intents win.
 INTENTS: tuple[Intent, ...] = (
+    Intent(
+        Route.NOT_COVERED,
+        (r"\bipos?\b", r"\b(bulk|block) deals?\b"),
+    ),
+    # Before compare: "Parag Parikh flexi cap vs Axis bluechip fund".
+    Intent(
+        Route.FUNDS,
+        (
+            r"\bmutual funds?\b",
+            r"\bnav\b",
+            r"\b(flexi ?cap|large ?cap|mid ?cap|small ?cap|multi ?cap|elss|index"
+            r"|liquid|debt|hybrid|bluechip|focused|value|contra|gilt)\s+funds?\b",
+            r"\bfunds?\b.{0,40}\b(returns?|nav|performance|holdings|portfolio)\b",
+            r"\b(direct|regular) plan\b",
+        ),
+    ),
+    Intent(
+        Route.OPTIONS,
+        (
+            r"\boption ?chain\b",
+            r"\b(pcr|put.call ratio|max pain|open interest)\b",
+            r"\b(options?|calls? and puts?) (data|oi|activity)\b",
+        ),
+    ),
+    Intent(
+        Route.SHAREHOLDING,
+        (
+            r"\bshare ?holding( pattern)?\b",
+            r"\b(promoter|fii|dii|institutional) (holding|stake|shareholding)\b",
+        ),
+    ),
     # Calculators first: "SIP of 5000 a month for 10 years at 12%" names no
     # company and every number in it is an input.
     Intent(

@@ -10,6 +10,7 @@ from sra.config import configure_logging, settings
 from sra.feeds import FeedError
 from sra.ingest.announcements_run import ingest_announcements
 from sra.ingest.fundamentals_run import FundamentalsIngestReport, ingest_fundamentals
+from sra.ingest.funds_run import ingest_funds
 from sra.ingest.instruments_run import ingest_all_indian_equities, ingest_instruments
 from sra.migrate import apply_migrations
 from sra.upstox.auth import authorize_url, exchange_code
@@ -81,6 +82,11 @@ def _cmd_ingest_announcements(_args: argparse.Namespace) -> int:
         f"{report.seen} announcements in the feed, {report.stored} new, "
         f"{report.unmapped} without a matching ISIN"
     )
+    return 0
+
+
+def _cmd_ingest_funds(_args: argparse.Namespace) -> int:
+    print(f"stored {ingest_funds()} mutual-fund schemes")
     return 0
 
 
@@ -218,6 +224,9 @@ def build_parser() -> argparse.ArgumentParser:
         "announcements",
         help="store BSE's latest corporate announcements (covers about a day)",
     ).set_defaults(func=_cmd_ingest_announcements)
+    ingest_sub.add_parser(
+        "funds", help="store every mutual fund's latest NAV from AMFI (daily)"
+    ).set_defaults(func=_cmd_ingest_funds)
 
     return parser
 

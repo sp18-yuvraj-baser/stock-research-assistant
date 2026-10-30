@@ -71,6 +71,19 @@ sra ingest announcements
 # crontab: 0 * * * * cd /path/to/repo && .venv/bin/sra ingest announcements
 ```
 
+Mutual-fund NAVs come from AMFI's daily file (about 14,000 schemes); fund
+returns are computed from api.mfapi.in's NAV history when asked:
+
+```bash
+sra ingest funds   # daily, e.g. from cron
+```
+
+Shareholding patterns and mutual-fund portfolio holdings need an optional
+free key from [BharatStock](https://bharatstockapi.com) (60 requests a day),
+set as `SRA_BHARATSTOCK_API_KEY`; answers are cached in the database to stay
+under that limit. IPOs and bulk/block deals are not covered: there is no
+free, reliable source for them.
+
 ## Use
 
 Run the local chat:

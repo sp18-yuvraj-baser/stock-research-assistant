@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     upstox_redirect_uri: str = "https://127.0.0.1/callback"
     upstox_max_requests_per_second: float = 5.0
 
+    # Optional free key from bharatstockapi.com (60 requests a day): adds
+    # shareholding patterns and mutual-fund portfolios. Empty disables both.
+    bharatstock_api_key: str = ""
+
 
 @lru_cache(maxsize=1)
 def settings() -> Settings:
