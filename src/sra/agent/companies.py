@@ -13,8 +13,8 @@ import psycopg
 
 from sra.upstox.instruments import EquityInstrument, match_instruments
 
-# Words that occur in holding questions but never start or end a company
-# name in them. Without this, "time" resolves to TIME TECHNOPLAST and "idea"
+# Words that occur in questions but never start or end a company name in
+# them. Without this, "time" resolves to TIME TECHNOPLAST and "idea"
 # to VODAFONE IDEA.
 _STOPWORDS = frozenset(
     """
@@ -32,6 +32,13 @@ _STOPWORDS = frozenset(
     lot more less trim ok okay please tell think idea view also just still
     yet already nse bse kya mujhe mere paas hai ka ki ke ya karu karun karna
     kar du dun chahiye rakhu rakhna bechu bechna nikal lena sahi abhi mein
+    dividend dividends yield yields payer payers paying high low highest
+    lowest chart graph history return returns week weeks performance result
+    results quarter quarterly earnings compare versus vs peer peers
+    competitor competitors rival rivals sector sectors company companies list
+    top best gainers losers active movers market markets index tax taxes gain
+    gains capital ltcg stcg screen growth margin margins debt free above below
+    under over between ratio ratios latest
     """.split()  # noqa: SIM905 -- a word list reads better as prose
 )
 

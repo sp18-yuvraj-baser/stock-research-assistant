@@ -13,7 +13,7 @@ from typing import Any
 import psycopg
 
 from sra.db import connect
-from sra.figures import period_start, to_decimal
+from sra.figures import cagr, period_start, to_decimal
 
 Ratio = tuple[Decimal | None, Decimal | None]  # (company, sector)
 Series = list[tuple[date, Decimal]]  # oldest first
@@ -109,3 +109,48 @@ def load(keys: list[str] | None = None, *, quarterly: bool = False) -> Universe:
         for series in (*company.yearly.values(), *company.quarterly.values()):
             series.sort()
     return Universe(companies, max(fetched, default=None))
+
+
+GROWTH_YEARS = 3
+
+
+def _latest(series: Series | None) -> tuple[date, Decimal] | None:
+    return series[-1] if series else None
+
+
+def metrics(company: CompanyFacts) -> dict[str, Decimal]:
+    """The figures screens and lists filter and sort on, all from stored rows.
+
+    Keys: roe, roce, roa, pe, pb, ev_ebitda (Upstox ratios); revenue (latest
+    yearly, ₹ crore); revenue_growth and profit_growth (compound % a year over
+    GROWTH_YEARS); net_margin (%); liabilities_to_assets (%, non-banks).
+    Missing inputs simply leave a key out.
+    """
+    found: dict[str, Decimal] = {}
+    for key, name in (
+        ("roe", "ROE"), ("roce", "ROCE"), ("roa", "ROA"),
+        ("pe", "P/E"), ("pb", "P/B"), ("ev_ebitda", "EV/EBITDA"),
+    ):  # fmt: skip
+        value = company.ratio(name)
+        if value is not None:
+            found[key] = value
+    revenue = company.yearly.get("revenue", [])
+    profit = company.yearly.get("net_profit", [])
+    if revenue:
+        found["revenue"] = revenue[-1][1]
+    for key, series in (("revenue_growth", revenue), ("profit_growth", profit)):
+        if len(series) > GROWTH_YEARS:
+            rate = cagr(series[-(GROWTH_YEARS + 1)][1], series[-1][1], GROWTH_YEARS)
+            if rate is not None:
+                found[key] = rate
+    latest_revenue, latest_profit = _latest(revenue), _latest(profit)
+    same_year = (
+        latest_revenue and latest_profit and latest_revenue[0] == latest_profit[0]
+    )
+    if same_year and latest_revenue and latest_profit and latest_revenue[1] > 0:
+        found["net_margin"] = 100 * latest_profit[1] / latest_revenue[1]
+    assets = _latest(company.yearly.get("total_asset"))
+    liabilities = _latest(company.yearly.get("total_liability"))
+    if not company.is_bank and assets and liabilities and assets[1] > 0:
+        found["liabilities_to_assets"] = 100 * liabilities[1] / assets[1]
+    return found

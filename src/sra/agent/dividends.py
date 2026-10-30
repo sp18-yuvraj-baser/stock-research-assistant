@@ -8,13 +8,74 @@ last 365 days, divided by today's price.
 from datetime import date, timedelta
 from decimal import Decimal
 
+import psycopg
+
 from sra.agent.companies import resolve_companies
 from sra.agent.loop import PathResult
+from sra.db import connect
 from sra.figures import parse_day, rupees, to_decimal
 from sra.upstox.client import UpstoxError, shared_client
 from sra.upstox.market import full_quotes
 
 NOT_FOUND = 'Name one company, e.g. "TCS dividend history".'
+TOP_SHOWN = 15
+
+TOP_PAYERS_SQL = """
+SELECT ca.instrument_key, i.ticker, i.name, SUM(ca.amount) AS trailing
+FROM corporate_actions ca
+JOIN instruments i ON i.instrument_key = ca.instrument_key
+WHERE ca.kind = 'dividend' AND ca.amount > 0 AND ca.ex_date > %(since)s
+  AND i.exchange = 'NSE_EQ'
+GROUP BY ca.instrument_key, i.ticker, i.name
+"""
+
+NO_STORED_ACTIONS = (
+    "Dividend history is not stored yet. Run `sra migrate`, then "
+    "`sra upstox ingest-fundamentals --all`, to fill it in."
+)
+
+
+def top_payers(today: date) -> PathResult:
+    """Highest trailing-twelve-month yields among stored dividend payers."""
+    try:
+        with connect(readonly=True) as conn:
+            rows = conn.execute(
+                TOP_PAYERS_SQL, {"since": today - timedelta(days=365)}
+            ).fetchall()
+    except psycopg.errors.UndefinedTable:
+        return PathResult(text=NO_STORED_ACTIONS)
+    if not rows:
+        return PathResult(text=NO_STORED_ACTIONS)
+    payers = {str(r["instrument_key"]): r for r in rows}
+    try:
+        quotes = full_quotes(list(payers))
+    except UpstoxError as exc:
+        return PathResult(text=f"Live prices are unavailable right now ({exc}).")
+    yields = []
+    for key, row in payers.items():
+        if key in quotes:
+            price = Decimal(str(quotes[key].last_price))
+            trailing = Decimal(str(row["trailing"]))
+            yields.append((100 * trailing / price, row, trailing, price))
+    yields.sort(key=lambda item: item[0], reverse=True)
+    lines = [
+        f"  {i}. {row['ticker']} ({row['name']}): {pct:.2f}% "
+        f"({rupees(trailing)} a share over 12 months, price {rupees(price)})"
+        for i, (pct, row, trailing, price) in enumerate(yields[:TOP_SHOWN], start=1)
+    ]
+    return PathResult(
+        text="\n\n".join(
+            [
+                f"Highest dividend yields\n{len(yields)} stored companies paid a "
+                "dividend in the last 12 months; yield is those dividends over "
+                "today's price.",
+                "Trailing 12-month yield\n" + "\n".join(lines),
+                "Notes\n"
+                "  - A one-off special dividend inflates a yield that may not repeat.\n"
+                "  - A high yield can also mean the price has fallen; check why.",
+            ]
+        )
+    )
 
 
 def _events(isin: str) -> list[tuple[date, str, Decimal | None, str]]:
@@ -51,6 +112,8 @@ def _events(isin: str) -> list[tuple[date, str, Decimal | None, str]]:
 def answer(question: str, *, today: date | None = None) -> PathResult:
     today = today or date.today()
     found = resolve_companies(question)
+    if not found.companies:
+        return top_payers(today)
     if len(found.companies) != 1:
         return PathResult(text=NOT_FOUND)
     company = found.companies[0]

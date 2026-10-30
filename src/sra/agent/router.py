@@ -21,6 +21,7 @@ class Route(StrEnum):
     DIVIDENDS = "dividends"
     PORTFOLIO = "portfolio"
     TAX = "tax"
+    DISCOVER = "discover"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -91,6 +92,11 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.TAX: RouteInfo(
         "Tax estimate", "Indian capital-gains rules, dated; live price.", titled=True
     ),
+    Route.DISCOVER: RouteInfo(
+        "Find companies",
+        "Stored fundamentals and sectors, filtered in code.",
+        titled=True,
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -157,6 +163,26 @@ INTENTS: tuple[Intent, ...] = (
         ),
     ),
     Intent(Route.COMPARE, (r"\bcompare\b", r"\b(vs\.?|versus)\b")),
+    Intent(
+        Route.DISCOVER,
+        (
+            r"\b(stocks?|companies|shares)\b.{0,30}\b(with|having|where)\b",
+            r"\b(roe|roce|roa|p/?e|p/?b|ev/?ebitda|revenue growth|sales growth"
+            r"|profit growth|margins?)\b[^.,;]{0,15}\b(above|below|over|under"
+            r"|more than|less than|at least|at most|between|greater than)\b",
+            r"\bdebt.?free\b",
+            r"\b(peers?|competitors?|rivals?)\b",
+            r"\b(companies like|who competes with)\b",
+            # A sector word opening the question or after a list word, so
+            # "HDFC Bank shares" stays a question about HDFC Bank.
+            r"(?:^\s*|\b(?:list|top|best|all|some|good|of|the|which|show|largest"
+            r"|biggest|me|in)\s+)(it|bank|banking|pharma|auto|fmcg|cement|steel"
+            r"|metal|power|energy|oil|telecom|realty|insurance|chemical|defence"
+            r"|finance|textile|infra)s? (stocks|companies|shares|sector)\b",
+            r"\bscreen\b",
+        ),
+        unless_holding=True,
+    ),
     Intent(
         Route.RESULTS,
         (

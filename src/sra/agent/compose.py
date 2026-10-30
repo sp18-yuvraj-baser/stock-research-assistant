@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 from sra.agent import (
     compare,
+    discover,
     dividends,
     history,
     market,
@@ -109,6 +110,7 @@ CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
     Route.ADVICE: portfolio.answer,
     Route.PORTFOLIO: portfolio.answer,
     Route.TAX: tax.answer,
+    Route.DISCOVER: discover.answer,
     Route.SCREEN: screen.run,
     Route.HISTORY: history.answer,
     Route.MARKET: market.answer,

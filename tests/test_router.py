@@ -249,3 +249,20 @@ def test_fundamentals_depth_intents(question: str, route: Route) -> None:
 )
 def test_portfolio_and_tax_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("IT stocks", Route.DISCOVER),
+        ("list of bank stocks", Route.DISCOVER),
+        ("peers of infosys", Route.DISCOVER),
+        ("stocks with ROE above 20% and P/E below 25", Route.DISCOVER),
+        ("debt-free IT companies", Route.DISCOVER),
+        ("high dividend stocks", Route.DIVIDENDS),
+        ("I have 100 hdfc bank stocks, should I keep or sell them?", Route.ADVICE),
+        ("Shall I sell my HDFC Bank shares?", Route.ADVICE),
+    ],
+)
+def test_discovery_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route
