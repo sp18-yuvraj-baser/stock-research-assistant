@@ -34,6 +34,7 @@ def market(monkeypatch: pytest.MonkeyPatch) -> None:
         HDFC.instrument_key: 700.0,
     }
     monkeypatch.setattr(portfolio, "resolve_companies", fake_resolve)
+    monkeypatch.setattr(holding, "price_trend", lambda key, price: None)
     for module in (portfolio, tax):
         monkeypatch.setattr(
             module, "full_quotes", lambda keys: {k: _quote(k, prices[k]) for k in keys}
@@ -79,6 +80,11 @@ def test_portfolio_review_weights_gains_and_sectors(market: None) -> None:
         in text
     )
     assert "  IT: 53.3%" in text and "  Banks: 46.7%" in text
+    # No stored ratios here, so every call is a low-conviction hold.
+    assert "(+25.00%); my call: HOLD (low conviction)" in text
+    assert "Here's how I'd handle these: hold TCS, INFY, HDFCBANK." in text
+    assert "HDFCBANK is 46.7% of the portfolio, more than I'd keep" in text
+    assert "rest on little stored data" in text
 
 
 def test_one_holding_goes_to_the_holding_review(

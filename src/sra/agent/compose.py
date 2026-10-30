@@ -2,9 +2,9 @@
 
 Each route owns one path; a question that routes to general finance is first
 checked against the instruments table, so a company named in plain words still
-reaches the data paths. Holding reviews and out-of-scope replies are
-rendered in code so they cannot be talked out of their wording; the other
-routes run a single tool-using model loop. Follow-ups are rewritten to stand
+reaches the data paths. Code-rendered answers (holding calls among them,
+whose call is scored in code and only worded by the model) cannot be talked
+out of their figures; the other routes run a single tool-using model loop. Follow-ups are rewritten to stand
 alone first, so no path ever sees earlier turns.
 """
 

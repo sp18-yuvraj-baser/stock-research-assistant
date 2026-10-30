@@ -1,8 +1,10 @@
 # Indian Stock Research Assistant
 
 Local research chat for NSE and BSE cash equities. It provides evidence-backed
-facts, live quotes, and finance education. It does not give personalised buy,
-sell, or hold advice, and no return is guaranteed.
+facts, live quotes, finance education, and a scored buy/hold/sell call on a
+stock you own or are considering. The call comes from a fixed scoring of the
+data, not from knowing your finances; it is not personalised advice, and no
+return is guaranteed.
 
 ## Setup
 
@@ -84,6 +86,29 @@ set as `SRA_BHARATSTOCK_API_KEY`; answers are cached in the database to stay
 under that limit. IPOs and bulk/block deals are not covered: there is no
 free, reliable source for them.
 
+## Buy/sell calls
+
+A question about keeping, selling or buying one stock gets a call: buy more,
+hold, reduce or sell if you own it; buy, wait or avoid if you don't. The
+call is scored in code from up to four groups of signals, each capped at
+±2 so no single group decides it:
+
+| Group | Signal (+1 / -1) |
+|---|---|
+| Valuation | P/E, P/B, EV/EBITDA cheaper / pricier than sector (a negative P/E is -2) |
+| Quality | ROE, ROCE, ROA and bank ratios better / weaker than sector |
+| Growth | latest yearly revenue and net profit up / down |
+| Trend | price above / below its 200-day average; 1-year move beyond ±15% |
+
+An owner's score of +3 or more is buy more, -1 to +2 hold, -2 or -3 reduce,
+-4 or less sell; for someone who doesn't own the stock, +3 or more is buy,
+-1 to +2 wait, -2 or less avoid. Fewer than three signals keeps the call at
+hold or wait with low conviction. The local model then writes the note in an
+analyst's voice; it must state the given call and may only use numbers from
+the evidence, or the note is written in code instead. The evidence, the
+points for and against, and what would change the call are always shown
+under the note.
+
 ## Use
 
 Run the local chat:
@@ -96,15 +121,14 @@ Open <http://127.0.0.1:8001>. Follow-up questions keep the context of the
 chat; the browser holds the conversation and "New chat" clears it. In Chrome,
 Edge and Safari a microphone button fills the box from speech.
 
-What it answers (every figure computed in code from real data; it never
-says buy or sell):
+What it answers (every figure computed in code from real data):
 
 | Ask | Example |
 |---|---|
 | Live price and today's session | "What's TCS trading at right now?" |
 | Price history, 52-week range, chart | "Reliance 5 year chart", "TCS 52 week high" |
 | Market overview, top movers, holidays | "How is the market today?", "top gainers" |
-| Holding or portfolio review | "I have 100 HDFC Bank shares bought at 709, keep?", "my portfolio: 100 TCS at 3500, 50 INFY at 1400" |
+| Buy/sell call on a stock or a portfolio | "I have 100 HDFC Bank shares bought at 709, keep?", "Should I buy TCS?", "my portfolio: 100 TCS at 3500, 50 INFY at 1400" |
 | Capital-gains tax estimate | "tax if I sell 100 TCS bought at 2000 in March 2024" |
 | Fundamentals, comparisons, results, dividends | "Compare TCS vs Infosys", "TCS latest quarterly results", "ITC dividend history" |
 | Screens, sectors, peers | "stocks with ROE above 20% and P/E below 25", "IT stocks", "peers of Infosys", "suggest stocks for long term" |

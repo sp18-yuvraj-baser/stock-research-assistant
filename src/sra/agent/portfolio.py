@@ -2,8 +2,8 @@
 
 "100 TCS at 3500, 50 INFY at 1400, HDFCBANK 200" becomes one holding per
 part, priced with a single batched live quote. Weights, gains and sector
-concentration are computed here; like the single-holding review it never
-says what to buy or sell.
+concentration are computed here, and each holding gets the same scored call
+as the single-holding review (buy more, hold, reduce or sell).
 """
 
 import re
@@ -14,15 +14,13 @@ from sra.agent import holding
 from sra.agent.companies import resolve_companies
 from sra.agent.loop import PathResult
 from sra.agent.universe import load
+from sra.agent.verdict import Action, Verdict, decide
 from sra.figures import rupees
 from sra.upstox.client import UpstoxError
 from sra.upstox.instruments import EquityInstrument
 from sra.upstox.market import full_quotes
 
-DISCLAIMER = (
-    "This is research, not investment advice. For a personal recommendation, "
-    "consult a SEBI-registered investment adviser."
-)
+DISCLAIMER = holding.DISCLAIMER
 
 # One stock above this share of the portfolio is called out.
 CONCENTRATION_PCT = Decimal(25)
@@ -85,7 +83,8 @@ def review_holdings(holdings: list[Holding]) -> PathResult:
         quotes = full_quotes(keys)
     except UpstoxError as exc:
         return PathResult(text=f"Live prices are unavailable right now ({exc}).")
-    sectors = {k: f.sector for k, f in load(keys).companies.items()}
+    facts = load(keys).companies
+    sectors = {k: f.sector for k, f in facts.items()}
 
     priced = [h for h in holdings if h.company.instrument_key in quotes]
     value = {
@@ -96,6 +95,15 @@ def review_holdings(holdings: list[Holding]) -> PathResult:
     total = sum(value.values(), Decimal(0))
     if not priced or total <= 0:
         return PathResult(text="No live prices came back for these holdings.")
+
+    calls: dict[str, Verdict] = {}
+    for h in priced:
+        key = h.company.instrument_key
+        found = holding.price_trend(key, quotes[key].last_price)
+        signals = holding.facts_signals(facts[key]) if key in facts else []
+        calls[h.company.ticker] = decide(
+            signals + ([] if found is None else found.signals), owns=True
+        )
 
     rows = []
     for h in holdings:
@@ -114,6 +122,8 @@ def review_holdings(holdings: list[Holding]) -> PathResult:
                 f", {'gain' if gain >= 0 else 'loss'} {rupees(abs(gain))} "
                 f"({100 * gain / (h.quantity * h.buy_price):+.2f}%)"
             )
+        call = calls[ticker]
+        line += f"; my call: {call.action.upper()} ({call.conviction} conviction)"
         rows.append(line)
 
     costed = [h for h in priced if h.buy_price is not None]
@@ -152,18 +162,55 @@ def review_holdings(holdings: list[Holding]) -> PathResult:
 
     sections = [
         f"Portfolio review: {len(holdings)} holdings\n"
-        "I can't tell you to buy, sell or hold, but here is what the data says.",
+        "Each holding is scored on valuation, quality, growth and price trend.",
+        _take(calls, largest, share),
         "Holdings at live prices\n" + "\n".join(rows),
         "Totals\n" + "\n".join(totals),
         "Concentration\n" + "\n".join(concentration),
-        "Before deciding, ask yourself\n"
-        "  - Is any one stock or sector a bigger share than you could stomach "
-        "falling by half?\n"
-        '  - Ask "Should I keep my <SYMBOL> shares?" for a full review of any one '
-        "holding, or about tax before selling.",
         DISCLAIMER,
     ]
     return PathResult(text="\n\n".join(sections))
+
+
+_VERBS = {
+    Action.BUY_MORE: "add to",
+    Action.HOLD: "hold",
+    Action.REDUCE: "reduce",
+    Action.SELL: "sell",
+}
+
+
+def _take(calls: dict[str, Verdict], largest: str, share: Decimal) -> str:
+    """The portfolio's calls in a few plain sentences."""
+    by_action: dict[Action, list[str]] = {}
+    for ticker, call in calls.items():
+        by_action.setdefault(call.action, []).append(ticker)
+    plan = "; ".join(
+        f"{verb} {', '.join(by_action[action])}"
+        for action, verb in _VERBS.items()
+        if action in by_action
+    )
+    text = f"Here's how I'd handle these: {plan}."
+    if share > CONCENTRATION_PCT:
+        text += (
+            f" {largest} is {share:.1f}% of the portfolio, more than I'd keep in "
+            "one stock"
+            + (
+                ", so I wouldn't add to it even though the data looks good."
+                if calls[largest].action is Action.BUY_MORE
+                else "; trimming it would spread the risk."
+            )
+        )
+    low = [t for t, c in calls.items() if c.conviction == "low"]
+    if low:
+        text += (
+            f" The calls on {', '.join(low)} rest on little stored data, so "
+            "treat them lightly."
+        )
+    return (
+        text + ' Ask "Should I keep my <SYMBOL> shares?" for the full reasoning '
+        "behind any one call, or about tax before selling."
+    )
 
 
 NO_HOLDINGS = (

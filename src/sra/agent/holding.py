@@ -1,13 +1,14 @@
-"""Answer buy/sell/hold questions with a holding review rendered in code.
+"""Answer buy/sell/hold questions with a researched call.
 
-A live run of the model-driven version showed why this is code: the local
-model multiplied share counts in its head, wrote SQL that failed on the
-NSE/BSE duplicate rows, called a P/E above its sector "below", and ran out of
-output tokens before the disclaimer. Here every figure comes from a query or
-the live quote, every comparison and multiplication is done in Python, and the
-"not advice" line cannot be dropped. The review never says keep or sell; it
-lays out the evidence on both sides and the questions only the user can
-answer.
+The evidence is gathered and scored in code: the live quote, a year of
+prices, stored ratios against the sector and the yearly results. A live run
+of an earlier model-driven version showed why: the local model multiplied
+share counts in its head, wrote SQL that failed on the NSE/BSE duplicate
+rows and called a P/E above its sector "below". So every figure comes from a
+query or the live quote, the call comes from verdict.decide, and the model
+only writes the analyst's note around it (narrate checks that note and falls
+back to prose written here). The evidence is shown under the note, and the
+disclaimer cannot be dropped.
 """
 
 import re
@@ -16,25 +17,46 @@ from datetime import date
 from decimal import Decimal
 
 from sra.agent.companies import resolve_companies
-from sra.agent.history import price_stats
 from sra.agent.loop import PathResult
-from sra.figures import months_between, pct_change, period_start, rupees, to_decimal
+from sra.agent.narrate import narrate
+from sra.agent.universe import CompanyFacts
+from sra.agent.verdict import (
+    AVERAGE_DAYS,
+    MAX_SCORE,
+    MIN_SIGNALS,
+    Action,
+    Signal,
+    Trend,
+    Verdict,
+    boundaries,
+    decide,
+    trend,
+)
+from sra.figures import (
+    months_between,
+    pct_change,
+    period_label,
+    period_start,
+    rupees,
+    to_decimal,
+)
 from sra.tools.get_live_quote import LiveQuote, get_live_quote, ist_time
 from sra.tools.run_sql import SqlResult, run_sql
 from sra.upstox.client import UpstoxError
 from sra.upstox.market import daily_candles
 
 DISCLAIMER = (
-    "This is research, not investment advice. For a personal recommendation, "
-    "consult a SEBI-registered investment adviser."
+    "This is research, not investment advice: the call comes from a fixed "
+    "scoring of the data shown and does not know your goals, tax position or "
+    "other holdings. For a personal recommendation, consult a SEBI-registered "
+    "investment adviser."
 )
 
 NO_COMPANY = f"""\
-I couldn't find an NSE company in that question. I can't pick stocks or tell
-you to buy, sell or hold, but I can review one.
-Name the NSE/BSE company, e.g. "I have 100 HDFCBANK shares bought at 1500,
-should I keep them?", and I'll show its live price, your position value,
-valuation against its sector and its profit trend.
+I couldn't find an NSE company in that question. Name the NSE/BSE company,
+e.g. "I have 100 HDFCBANK shares bought at 1500, should I keep them?" or
+"Should I buy TCS?", and I'll research it and give you my call: buy more,
+hold, reduce or sell if you own it; buy, wait or avoid if you don't.
 
 {DISCLAIMER}"""
 
@@ -174,6 +196,11 @@ class _Ratio:
         return 1 if better else -1
 
 
+def _ordered(ratios: list[_Ratio]) -> list[_Ratio]:
+    order = {name: index for index, name in enumerate(_RATIO_ORDER)}
+    return sorted(ratios, key=lambda r: order.get(r.name, len(order)))
+
+
 def _ratios(result: SqlResult) -> list[_Ratio]:
     ratios = []
     for row in result.rows:
@@ -182,8 +209,7 @@ def _ratios(result: SqlResult) -> list[_Ratio]:
             ratios.append(
                 _Ratio(str(row["name"]), company, to_decimal(row["sector_value"]))
             )
-    order = {name: index for index, name in enumerate(_RATIO_ORDER)}
-    return sorted(ratios, key=lambda r: order.get(r.name, len(order)))
+    return _ordered(ratios)
 
 
 def _describe_ratio(ratio: _Ratio) -> str:
@@ -270,6 +296,10 @@ def _series(result: SqlResult) -> list[_Series]:
             by_category.setdefault(str(row["category"]), []).append(
                 (str(row["period"]), value)
             )
+    return _series_from(by_category)
+
+
+def _series_from(by_category: dict[str, list[tuple[str, Decimal]]]) -> list[_Series]:
     labels = {"revenue": "Revenue", "net_profit": "Net profit"}
     series = []
     for category, label in labels.items():
@@ -286,72 +316,245 @@ def _describe_series(series: _Series) -> str:
     return f"{series.label}: {path}"
 
 
-def _year_lines(key: str, price: float) -> list[str]:
-    """52-week range and 1-year return; nothing when history is unavailable,
-    since the review stands without them."""
-    try:
-        stats = price_stats(daily_candles(key, years=1), price, date.today())
-    except UpstoxError:
-        return []
-    if stats is None:
-        return []
-    lines = [
-        f"52-week range: {rupees(stats.low.price)} to {rupees(stats.high.price)} "
-        f"(price is {100 * (1 - price / stats.high.price):.1f}% below the high)"
+def _signals(ratios: list[_Ratio], series: list[_Series]) -> list[Signal]:
+    """Valuation, quality and growth signals; the price trend adds its own."""
+    found = []
+    for ratio in ratios:
+        group = "valuation" if ratio.name in _VALUATION else "quality"
+        if ratio.meaningless:
+            # A negative multiple means losses, worse than any gap to sector.
+            found.append(Signal(_describe_ratio(ratio), -2, group))
+        elif ratio.standing:
+            found.append(Signal(_describe_ratio(ratio), ratio.standing, group))
+    for item in series:
+        move = item.latest_move
+        if move is not None:
+            found.append(Signal(move[0], move[1], "growth"))
+    return found
+
+
+def facts_signals(company: CompanyFacts) -> list[Signal]:
+    """The same signals from stored facts, for the portfolio review."""
+    ratios = [
+        _Ratio(name, own, sector)
+        for name, (own, sector) in company.ratios.items()
+        if own is not None
     ]
-    year = next((total for label, total, _ in stats.returns if label == "1 year"), None)
-    if year is not None:
-        lines.append(f"1-year price return: {year:+.2f}%")
+    by_category = {
+        category: [(period_label(when), value) for when, value in points]
+        for category, points in company.yearly.items()
+    }
+    return _signals(_ordered(ratios), _series_from(by_category))
+
+
+def price_trend(key: str, price: float) -> Trend | None:
+    """A year of price trend; None when history is unavailable, since the
+    review stands without it."""
+    try:
+        return trend(daily_candles(key, years=1), price, date.today())
+    except UpstoxError:
+        return None
+
+
+def _trend_lines(found: Trend) -> list[str]:
+    lines = [
+        f"52-week range: {rupees(found.low)} to {rupees(found.high)} "
+        f"(price is {100 * (1 - found.price / found.high):.1f}% below the high)"
+    ]
+    if found.average:
+        lines.append(f"{AVERAGE_DAYS}-day average: {rupees(found.average)}")
+    if found.year_return is not None:
+        lines.append(f"1-year price return: {found.year_return:+.2f}%")
     return lines
 
 
-def _position_lines(position: Position, quote: LiveQuote) -> list[str]:
+@dataclass(frozen=True)
+class _Stake:
+    quantity: Decimal
+    value: Decimal
+    gain: Decimal | None = None  # None without a buy price
+    gain_pct: Decimal | None = None
+
+
+def _stake(position: Position, price: Decimal) -> _Stake | None:
+    if position.quantity is None:
+        return None
+    value = position.quantity * price
+    if position.buy_price is None:
+        return _Stake(position.quantity, value)
+    cost = position.quantity * position.buy_price
+    return _Stake(position.quantity, value, value - cost, pct_change(cost, value))
+
+
+def _price(quote: LiveQuote) -> Decimal | None:
     if quote.last_price is None or quote.last_price <= 0:
+        return None
+    return Decimal(str(quote.last_price))
+
+
+def _position_lines(
+    position: Position, quote: LiveQuote, found: Trend | None
+) -> list[str]:
+    price = _price(quote)
+    if price is None:
         return [f"Live price unavailable: {quote.error or 'no valid price returned'}."]
-    price = Decimal(str(quote.last_price))
     exchange = quote.exchange.removesuffix("_EQ") or "NSE"
     lines = [f"Live price: {rupees(price)} ({exchange}, {ist_time(quote.fetched_at)})"]
-    lines += _year_lines(quote.instrument_key, quote.last_price)
+    if found is not None:
+        lines += _trend_lines(found)
     if position.conflicting:
         lines.append(
             "Position value left out: the question gives more than one share "
             "count or price."
         )
-    if position.quantity is None:
+    stake = _stake(position, price)
+    if stake is None:
         return lines
-    value = position.quantity * price
-    lines.append(f"Your {position.quantity.normalize():f} shares: {rupees(value)}")
-    if position.buy_price is not None:
-        cost = position.quantity * position.buy_price
-        gain = value - cost
-        word = "gain" if gain >= 0 else "loss"
+    lines.append(f"Your {stake.quantity.normalize():f} shares: {rupees(stake.value)}")
+    if stake.gain is not None and position.buy_price is not None:
+        word = "gain" if stake.gain >= 0 else "loss"
         lines.append(
             f"Bought at {rupees(position.buy_price)}: unrealised {word} "
-            f"{rupees(abs(gain))} ({pct_change(cost, value):+}%)"
-        )
-        # The live price is post-adjustment; a pre-bonus buy price is not, so
-        # a 1:1 bonus alone shows as a 50% loss.
-        lines.append(
-            "If you bought before a bonus issue or stock split, divide your buy "
-            "price by the adjustment ratio (and multiply your share count) first; "
-            "otherwise this gain or loss is wrong."
+            f"{rupees(abs(stake.gain))} ({stake.gain_pct:+}%)"
         )
     return lines
 
 
-def _points(ratios: list[_Ratio], series: list[_Series]) -> tuple[list[str], list[str]]:
-    favour: list[str] = []
-    against: list[str] = []
-    for ratio in ratios:
-        if ratio.meaningless:
-            against.append(_describe_ratio(ratio))
-        elif ratio.standing:
-            (favour if ratio.standing > 0 else against).append(_describe_ratio(ratio))
-    for item in series:
-        move = item.latest_move
-        if move is not None:
-            (favour if move[1] > 0 else against).append(move[0])
-    return favour, against
+# The live price is post-adjustment; a pre-bonus buy price is not, so a 1:1
+# bonus alone shows as a 50% loss.
+_ADJUSTMENT_NOTE = (
+    "If you bought before a bonus issue or stock split, divide your buy price "
+    "by the adjustment ratio (and multiply your share count) first; otherwise "
+    "this gain or loss is wrong."
+)
+
+# Owning the stock is what separates "buy more / sell" from "buy / avoid".
+_OWNS = re.compile(
+    r"\b(my|i have|i hold|i own|i've|holding|keep|sell|selling|exit|bought"
+    r"|purchased|buy more|add more|average down)\b",
+    re.IGNORECASE,
+)
+
+
+def owns_stock(question: str, position: Position) -> bool:
+    return (
+        position.quantity is not None
+        or position.buy_price is not None
+        or bool(_OWNS.search(question))
+    )
+
+
+def _lower_first(text: str) -> str:
+    """'Price ₹10 is ...' -> 'price ₹10 is ...', but 'P/E 12' stays."""
+    if len(text) > 1 and text[0].isupper() and text[1].islower():
+        return text[0].lower() + text[1:]
+    return text
+
+
+def _watch(
+    verdict: Verdict, found: Trend | None, series: list[_Series], owns: bool
+) -> list[str]:
+    """What would move the call, in the terms the call was made in."""
+    if len([s for s in verdict.signals if s.points]) < MIN_SIGNALS:
+        lines = [
+            "More data: too few signals to move off "
+            f"{verdict.action.upper()}; refreshing fundamentals may add some"
+        ]
+    else:
+        lines = [
+            "The score: the call becomes "
+            + " and ".join(boundaries(verdict.action, owns=owns))
+        ]
+    if found is not None and found.average:
+        above = found.price >= found.average
+        lines.append(
+            f"A close {'below' if above else 'back above'} the {AVERAGE_DAYS}-day "
+            f"average of {rupees(found.average)}, which would turn the trend "
+            f"{'against' if above else 'in favour of'} the stock"
+        )
+    latest = max((s.points[-1][0] for s in series), key=_when, default=None)
+    if latest is not None:
+        lines.append(
+            f"The yearly results after {latest}: growth in revenue and net profit "
+            "counts for the stock, a fall counts against it"
+        )
+    return lines
+
+
+_ACTION_TEXT = {
+    Action.BUY_MORE: "add to your position",
+    Action.HOLD: "hold what you have, without adding at this price",
+    Action.REDUCE: "reduce your position",
+    Action.SELL: "sell",
+    Action.BUY: "buy",
+    Action.WAIT: "wait rather than buy right now",
+    Action.AVOID: "avoid it for now",
+}
+_POSITION_TEXT = {
+    Action.BUY_MORE: "If you add, do it in steps rather than all at once.",
+    Action.HOLD: "Nothing here argues for selling, and not enough for adding.",
+    Action.REDUCE: "Selling part locks in some of the result and lowers what rides "
+    "on this one stock.",
+    Action.SELL: "Check the tax before you sell: shares held over 12 months are "
+    "taxed as long-term gains, and a loss can be set off against other gains.",
+}
+
+
+def _plain_note(name: str, verdict: Verdict, stake: _Stake | None) -> str:
+    """The note in code, for when the model is down or its note fails checks."""
+    first = (
+        f"My call on {name} is to {_ACTION_TEXT[verdict.action]}, with "
+        f"{verdict.conviction} conviction."
+    )
+    for word, signals in (("for", verdict.favour), ("against", verdict.against)):
+        if signals:
+            texts = "; ".join(_lower_first(s.text) for s in signals[:3])
+            first += f" Working {word} it: {texts}."
+    paragraphs = [first]
+    second = ""
+    if stake is not None:
+        second = f"Your {stake.quantity.normalize():f} shares are worth "
+        second += rupees(stake.value)
+        if stake.gain is not None:
+            word = "a gain" if stake.gain >= 0 else "a loss"
+            second += (
+                f", {word} of {rupees(abs(stake.gain))} ({stake.gain_pct:+}%) on "
+                "what you paid"
+            )
+        second += ". "
+    if verdict.action in _POSITION_TEXT:
+        second += _POSITION_TEXT[verdict.action]
+    if second:
+        paragraphs.append(second.strip())
+    return "\n\n".join(paragraphs)
+
+
+def _brief(
+    question: str,
+    title: str,
+    owns: bool,
+    position_lines: list[str],
+    verdict: Verdict,
+) -> str:
+    """Everything the model may say, and nothing else."""
+
+    def listed(heading: str, items: list[str]) -> list[str]:
+        return [heading, *(f"- {item}" for item in items or ["none"])]
+
+    return "\n".join(
+        [
+            f"Client's question: {question}",
+            f"Stock: {title}",
+            "The client owns this stock."
+            if owns
+            else "The client does not own this stock and asks whether to buy it.",
+            f"Call: {verdict.action.upper()}, {verdict.conviction} conviction "
+            f"(score {verdict.score:+d} on a scale of -{MAX_SCORE} to +{MAX_SCORE})",
+            *listed("Price and position:", position_lines),
+            *listed("Evidence for:", [s.text for s in verdict.favour]),
+            *listed("Evidence against:", [s.text for s in verdict.against]),
+        ]
+    )
 
 
 def _with_disclaimer(text: str) -> PathResult:
@@ -359,7 +562,7 @@ def _with_disclaimer(text: str) -> PathResult:
 
 
 def review(question: str) -> PathResult:
-    """Render a review of the one company the question names."""
+    """Research the one company the question names and make a call on it."""
     resolution = resolve_companies(question)
     if resolution.error:
         return _with_disclaimer(
@@ -371,7 +574,8 @@ def review(question: str) -> PathResult:
         return _with_disclaimer(
             f"You mentioned {names}. I review one stock at a time so every "
             "figure stays tied to the right company: ask about each separately, "
-            'e.g. "Should I keep my 10 TCS shares?".'
+            'e.g. "Should I keep my 10 TCS shares?", or list them all as a '
+            'portfolio: "100 TCS at 3500, 50 INFY at 1400".'
         )
     if not resolution.companies:
         if not resolution.ambiguous:
@@ -384,6 +588,7 @@ def review(question: str) -> PathResult:
 
     result = PathResult()
     position = parse_position(question)
+    owns = owns_stock(question, position)
     quote = get_live_quote(company.ticker, exchange=company.exchange)
     result.quote_calls.append(quote)
     params = {"key": company.instrument_key}
@@ -405,19 +610,39 @@ def review(question: str) -> PathResult:
     result.sql_calls.extend([ratios_sql, financials_sql, profile_sql])
     ratios = _ratios(ratios_sql)
     series = _series(financials_sql)
+    price = _price(quote)
+    found = None if price is None else price_trend(quote.instrument_key, float(price))
 
-    intro = "I can't tell you to buy, sell or hold, but here is what the data says."
+    signals = _signals(ratios, series) + ([] if found is None else found.signals)
+    verdict = decide(signals, owns=owns)
+    watch = _watch(verdict, found, series, owns)
+    position_lines = _position_lines(position, quote, found)
+    stake = None if price is None else _stake(position, price)
+
+    title = f"{company.name} ({company.ticker})"
+    lede = f"{verdict.headline}."
     # No sector until migration 009 and an ingest have run; the review stands
     # without it.
     if not profile_sql.error and profile_sql.rows and profile_sql.rows[0]["sector"]:
-        intro = f"Sector: {profile_sql.rows[0]['sector']}\n{intro}"
+        sector = profile_sql.rows[0]["sector"]
+        lede += f" Sector: {sector}."
+        title += f", sector {sector}"
     if resolution.set_aside:
         others = ", ".join(f"{c.ticker} ({c.name})" for c in resolution.set_aside)
-        intro += f"\nAlso matched {others}: ask separately if you meant it."
+        lede += f"\nAlso matched {others}: ask separately if you meant it."
+    note = narrate(
+        _brief(question, title, owns, position_lines, verdict), verdict.action
+    ) or _plain_note(company.name, verdict, stake)
+
     sections = [
-        f"{company.name} ({company.ticker}): review\n{intro}",
-        "Your position\n"
-        + "\n".join(f"  {line}" for line in _position_lines(position, quote)),
+        f"{company.name} ({company.ticker}): review\n{lede}",
+        note,
+        "Price and position\n"
+        + "\n".join(
+            f"  {line}"
+            for line in position_lines
+            + ([_ADJUSTMENT_NOTE] if stake and stake.gain is not None else [])
+        ),
     ]
     heading = "Valuation and quality vs sector"
     if ratios_sql.error:
@@ -440,29 +665,20 @@ def review(question: str) -> PathResult:
             lines.append(
                 f"  Note: a move of over {_STEP_CHANGE_PCT}% in {', '.join(steps)} "
                 "often reflects a merger, demerger or one-off item, not "
-                "like-for-like growth."
+                "like-for-like growth, so it is left out of the score."
             )
         sections.append(f"{heading}\n" + "\n".join(lines))
     else:
         sections.append(f"{heading}\n  No yearly revenue or profit data.")
 
-    favour, against = _points(ratios, series)
-    nothing = ["Nothing in this data stands out."]
+    for heading, side in (
+        ("Points in favour", verdict.favour),
+        ("Points against", verdict.against),
+    ):
+        points = [s.text for s in side] or ["Nothing in this data stands out."]
+        sections.append(f"{heading}\n" + "\n".join(f"  - {p}" for p in points))
     sections.append(
-        "Points in favour\n" + "\n".join(f"  - {p}" for p in favour or nothing)
-    )
-    sections.append(
-        "Points against\n" + "\n".join(f"  - {p}" for p in against or nothing)
-    )
-    sections.append(
-        "Before deciding, ask yourself\n"
-        "  - What did you pay and how long have you held? Listed shares held "
-        "over 12 months are taxed as long-term capital gains, under 12 months "
-        "as short-term.\n"
-        "  - How much of your portfolio is this one stock?\n"
-        "  - Does your original reason for buying still hold, and what is your "
-        "time horizon?\n"
-        "  - Not covered here: news, 52-week range, technicals, analyst views."
+        "What would change my view\n" + "\n".join(f"  - {line}" for line in watch)
     )
     sections.append(DISCLAIMER)
     result.text = "\n\n".join(sections)

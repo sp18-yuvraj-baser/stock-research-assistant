@@ -70,8 +70,8 @@ class RouteInfo(NamedTuple):
 # this, so a new route cannot be missing from the UI or the research summary.
 ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.ADVICE: RouteInfo(
-        "Holding review",
-        "Holding review from live quote and fundamentals; no verdict.",
+        "Buy/sell call",
+        "Scored call from live quote, price trend and fundamentals vs sector.",
         titled=True,
     ),
     Route.SCREEN: RouteInfo(
@@ -97,7 +97,9 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
         "Dividends", "Upstox corporate actions and live price.", titled=True
     ),
     Route.PORTFOLIO: RouteInfo(
-        "Portfolio review", "Live quotes and stored sectors; no verdict.", titled=True
+        "Portfolio review",
+        "Live quotes, sectors and a scored call per holding.",
+        titled=True,
     ),
     Route.TAX: RouteInfo(
         "Tax estimate", "Indian capital-gains rules, dated; live price.", titled=True

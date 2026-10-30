@@ -8,6 +8,7 @@ import pytest
 
 from sra.agent import companies, holding
 from sra.agent.holding import DISCLAIMER, NO_COMPANY, Position, parse_position
+from sra.agent.verdict import Action
 from sra.tools.get_live_quote import LiveQuote
 from sra.tools.run_sql import SqlResult
 from sra.upstox.instruments import EquityInstrument
@@ -103,6 +104,7 @@ def data(monkeypatch: pytest.MonkeyPatch) -> FakeData:
     monkeypatch.setattr(companies, "match_instruments", fake.match_instruments)
     monkeypatch.setattr(holding, "get_live_quote", fake.get_live_quote)
     monkeypatch.setattr(holding, "daily_candles", fake.daily_candles)
+    monkeypatch.setattr(holding, "narrate", lambda brief, action: None)
     return fake
 
 
@@ -160,7 +162,12 @@ def test_review_renders_every_section_with_computed_figures(data: FakeData) -> N
         "I have 100 hdfc bank stocks bought at 600, should I keep or sell them?"
     ).text
 
-    assert text.startswith("HDFC BANK LTD (HDFCBANK): review\nSector: Banks\n")
+    # Valuation -1 (P/B), quality +1 (ROE, NIM, Net NPA), growth 0 (revenue
+    # up, profit down), trend +2 (above the 200-day average, up 32% a year).
+    assert text.startswith(
+        "HDFC BANK LTD (HDFCBANK): review\nMy call: HOLD (medium conviction, "
+        "score +2 on a scale of -8 to +8). Sector: Banks.\n"
+    )
     assert data.quotes == ["HDFCBANK:NSE_EQ"]
     assert "Live price: ₹682.50 (NSE, 29 Oct 2026, 12:32 IST)" in text
     assert "Your 100 shares: ₹68,250.00" in text
@@ -180,10 +187,70 @@ def test_review_renders_every_section_with_computed_figures(data: FakeData) -> N
     assert text.endswith(DISCLAIMER)
 
 
-def test_review_never_gives_a_verdict(data: FakeData) -> None:
-    text = holding.review("Should I sell my HDFCBANK shares?").text.lower()
-    for verdict in ("you should", "we recommend", "i recommend", "sell now"):
-        assert verdict not in text
+def test_someone_without_shares_is_told_buy_wait_or_avoid(data: FakeData) -> None:
+    text = holding.review("Should I buy HDFCBANK?").text
+    assert "My call: WAIT (medium conviction" in text
+    assert "Your " not in _section(text, "Price and position")
+    assert "BUY at +3 or above and AVOID at -2 or below" in text
+
+
+def test_strong_data_says_buy_more(data: FakeData) -> None:
+    data.ratios = [
+        {"name": "P/E", "company_value": "12", "sector_value": "20"},
+        {"name": "P/B", "company_value": "1.2", "sector_value": "2"},
+        {"name": "ROE", "company_value": "20", "sector_value": "12"},
+        {"name": "ROCE", "company_value": "22", "sector_value": "14"},
+    ]
+    data.financials = [
+        {"category": "revenue", "period": "Mar 2025", "value": "100"},
+        {"category": "revenue", "period": "Mar 2026", "value": "120"},
+        {"category": "net_profit", "period": "Mar 2025", "value": "10"},
+        {"category": "net_profit", "period": "Mar 2026", "value": "13"},
+    ]
+    text = holding.review("I have 10 HDFCBANK shares, keep or sell?").text
+    assert "My call: BUY MORE (high conviction, score +8" in text
+    assert "Nothing in this data stands out." in _section(text, "Points against")
+
+
+def test_weak_data_says_sell(data: FakeData) -> None:
+    data.ratios = [
+        {"name": "P/E", "company_value": "-5", "sector_value": "20"},
+        {"name": "ROE", "company_value": "-3", "sector_value": "12"},
+    ]
+    data.financials = [
+        {"category": "net_profit", "period": "Mar 2025", "value": "10"},
+        {"category": "net_profit", "period": "Mar 2026", "value": "-4"},
+    ]
+    data.price = 300.0  # far below a year of 500-700 closes
+    text = holding.review("Should I sell my HDFCBANK shares?").text
+    assert "My call: SELL (" in text
+    assert "Check the tax before you sell" in text
+
+
+def test_the_model_note_is_used_when_it_passes_checks(
+    data: FakeData, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    briefs: list[str] = []
+
+    def fake_narrate(brief: str, action: Action) -> str:
+        briefs.append(brief)
+        assert action is Action.HOLD
+        return "I'd hold your HDFC Bank shares."
+
+    monkeypatch.setattr(holding, "narrate", fake_narrate)
+    text = holding.review("I have 100 HDFCBANK shares bought at 600, keep?").text
+    assert text.split("\n\n")[1] == "I'd hold your HDFC Bank shares."
+    assert "Call: HOLD, medium conviction" in briefs[0]
+    assert "- Bought at ₹600.00: unrealised gain ₹8,250.00 (+13.75%)" in briefs[0]
+    # The bonus caveat is for the reader, not material for the note.
+    assert "bonus" not in briefs[0]
+
+
+def test_without_the_model_the_note_is_written_in_code(data: FakeData) -> None:
+    text = holding.review("I have 100 HDFCBANK shares bought at 600, keep?").text
+    note = text.split("\n\n")[1]
+    assert note.startswith("My call on HDFC BANK LTD is to hold what you have")
+    assert "Your 100 shares are worth ₹68,250.00, a gain of ₹8,250.00" in text
 
 
 def test_negative_equal_and_missing_values(data: FakeData) -> None:

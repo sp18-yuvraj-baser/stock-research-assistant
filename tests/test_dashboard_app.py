@@ -364,7 +364,7 @@ def test_routes_lists_a_label_for_every_route() -> None:
         .json()
     )
     assert set(labels) == {route.value for route in Route}
-    assert labels["advice"] == {"label": "Holding review", "titled": True}
+    assert labels["advice"] == {"label": "Buy/sell call", "titled": True}
     assert labels["realtime"]["titled"] is False
 
 

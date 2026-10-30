@@ -213,6 +213,10 @@
     // Inline text: **bold** from model answers, and coloured tags for the
     // comparisons the holding review prints.
     const TAGS = [
+      // The call, as written after "My call:" by the holding and portfolio reviews.
+      [/(?<=[Mm]y call: )(BUY MORE|BUY)\b/, 'good'],
+      [/(?<=[Mm]y call: )(HOLD|WAIT)\b/, 'warn'],
+      [/(?<=[Mm]y call: )(REDUCE|SELL|AVOID)\b/, 'bad'],
       [/(better than sector|cheaper than sector|went from a loss to a profit|loss narrowed|unrealised gain)/, 'good'],
       [/(weaker than sector|pricier than sector|went from a profit to a loss|loss widened|unrealised loss)/, 'bad'],
       [/(sector figure looks unreliable|not meaningful)/, 'warn'],
