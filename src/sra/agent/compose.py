@@ -12,10 +12,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from sra.agent import (
+    calculators,
     compare,
     discover,
     dividends,
     documents,
+    explain,
     history,
     market,
     news,
@@ -116,6 +118,8 @@ CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
     Route.NEWS: news.news,
     Route.ANNOUNCEMENTS: news.announcements,
     Route.DOCUMENTS: documents.answer,
+    Route.EXPLAIN: explain.answer,
+    Route.CALCULATOR: calculators.answer,
     Route.SCREEN: screen.run,
     Route.HISTORY: history.answer,
     Route.MARKET: market.answer,

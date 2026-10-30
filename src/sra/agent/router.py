@@ -25,6 +25,8 @@ class Route(StrEnum):
     NEWS = "news"
     ANNOUNCEMENTS = "announcements"
     DOCUMENTS = "documents"
+    EXPLAIN = "explain"
+    CALCULATOR = "calculator"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -111,6 +113,12 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
         "BSE filing PDF; answer limited to checked quotations.",
         titled=True,
     ),
+    Route.EXPLAIN: RouteInfo(
+        "Worked example", "Formula applied to stored figures.", titled=True
+    ),
+    Route.CALCULATOR: RouteInfo(
+        "Calculator", "Computed from the numbers you gave.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -137,6 +145,31 @@ class Intent:
 
 # Ordered: earlier intents win.
 INTENTS: tuple[Intent, ...] = (
+    # Calculators first: "SIP of 5000 a month for 10 years at 12%" names no
+    # company and every number in it is an input.
+    Intent(
+        Route.CALCULATOR,
+        (
+            r"\bsip\b.{0,40}\d",
+            r"\bcagr\b.{0,40}\bfrom\b",
+            r"\bposition siz",
+            r"\bbreak.?even\b",
+            r"\blump ?sum\b.{0,40}\d",
+            r"\binvest\s+(rs\.?|₹)?\s*\d.{0,40}\b(years?|yrs?)\b",
+            r"\bcalculat(e|or)\b.{0,30}\b(sip|cagr|returns?|charges|brokerage)\b",
+        ),
+        unless_education=False,
+    ),
+    Intent(
+        Route.EXPLAIN,
+        (
+            r"\bhow (is|was|are|do you|to) .{0,40}\b(calculated|computed|derived"
+            r"|worked out)\b",
+            r"\b(show|explain|walk me through)\b.{0,30}\b(roe|roa|p/?e|p/?b"
+            r"|margin)\b.{0,30}\b(of|for|with)\b",
+        ),
+        unless_education=False,
+    ),
     # First: "tax if I sell my 100 TCS" is about tax, not about the holding.
     Intent(
         Route.TAX,

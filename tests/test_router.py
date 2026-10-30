@@ -295,3 +295,18 @@ def test_news_intents(question: str, route: Route) -> None:
 )
 def test_document_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("SIP of 5000 a month for 10 years at 12%", Route.CALCULATOR),
+        ("what is the CAGR from 100 to 250 in 5 years", Route.CALCULATOR),
+        ("break-even for 100 shares bought at 2500", Route.CALCULATOR),
+        ("how is TCS's ROE calculated?", Route.EXPLAIN),
+        ("explain the P/E of infosys", Route.EXPLAIN),
+        ("What is a SIP?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_learning_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route
