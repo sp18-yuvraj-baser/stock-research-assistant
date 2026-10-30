@@ -102,7 +102,11 @@ def ask(
         return answer
 
     code_path = CODE_PATHS.get(routing.route)
-    if code_path is not None:
+    if routing.route is Route.WATCHLIST:
+        # The only answer that writes: it must see what the user typed, not
+        # just the rewrite (see watchlist.answer).
+        answer.path = watchlist.answer(question, typed=original)
+    elif code_path is not None:
         answer.path = code_path(question)
     else:
         answer.path = _MODEL_PATHS[routing.route](question, **kwargs)

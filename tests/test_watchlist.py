@@ -77,3 +77,17 @@ def test_adding_twice_keeps_one_entry(db: _Db) -> None:
 
 def test_no_stock_named_asks_for_one(db: _Db) -> None:
     assert "Name the stocks" in watchlist.answer("add to my watchlist").text
+
+
+def test_a_rewritten_follow_up_cannot_decide_to_write(db: _Db) -> None:
+    watchlist.answer("add TCS to my watchlist")
+    # The rewrite says "remove", but the user only asked to see the list.
+    text = watchlist.answer(
+        "remove TCS from my watchlist", typed="and what does my watchlist look like?"
+    ).text
+    assert "Removed" not in text and list(db.rows) == ["NSE_EQ|TCS"]
+
+
+def test_the_rewrite_may_still_name_the_stock(db: _Db) -> None:
+    watchlist.answer("add TCS to my watchlist", typed="add it to my watchlist")
+    assert list(db.rows) == ["NSE_EQ|TCS"]

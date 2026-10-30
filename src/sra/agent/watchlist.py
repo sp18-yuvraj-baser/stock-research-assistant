@@ -92,12 +92,24 @@ def show(*, today: date | None = None) -> PathResult:
     )
 
 
-def answer(question: str) -> PathResult:
-    text = question.lower()
+_LIST = r"\bwatch ?list\b"
+_ADD = r"\b(add|put|include|track)\b"
+_REMOVE = r"\b(remove|delete|drop|take off|untrack)\b"
+
+
+def answer(question: str, *, typed: str | None = None) -> PathResult:
+    """Edit or show the watchlist.
+
+    `typed` is the user's own message when `question` is a follow-up the
+    model rewrote. A rewrite draws on earlier turns, which can carry outside
+    text (headlines, filings), so it may name the stocks ("add it" -> TCS)
+    but never decide to write: only the user's own words can add or remove.
+    """
+    said = (typed or question).lower()
     try:
-        if re.search(r"\b(add|put|include|track)\b", text):
+        if re.search(_LIST, said) and re.search(_ADD, said):
             return _edit(question, add=True)
-        if re.search(r"\b(remove|delete|drop|take off|untrack)\b", text):
+        if re.search(_LIST, said) and re.search(_REMOVE, said):
             return _edit(question, add=False)
         return show()
     except psycopg.errors.UndefinedTable:
