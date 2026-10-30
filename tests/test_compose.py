@@ -19,7 +19,7 @@ def test_holding_question_gets_the_code_rendered_review(
         seen.append(question)
         return PathResult(text="HDFC BANK LTD (HDFCBANK): holding review")
 
-    monkeypatch.setattr(holding, "review", fake_review)
+    monkeypatch.setitem(compose.CODE_PATHS, Route.ADVICE, fake_review)
     question = "I have 100 hdfc bank stocks, should I keep or sell them?"
     answer = ask(question)
     assert seen == [question]
@@ -104,9 +104,19 @@ def test_no_lookup_when_the_regexes_already_route_it(
 def test_a_request_for_stocks_gets_the_code_rendered_screen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from sra.agent import screen
-
-    monkeypatch.setattr(screen, "run", lambda q: PathResult(text="screened"))
+    monkeypatch.setitem(
+        compose.CODE_PATHS, Route.SCREEN, lambda q: PathResult(text="screened")
+    )
     answer = ask("suggest me some stocks for long term investment")
     assert answer.route is Route.SCREEN
     assert answer.text == "screened"
+
+
+def test_every_route_is_described_and_every_code_route_answers() -> None:
+    from sra.agent.router import INTENTS, ROUTE_INFO
+
+    assert set(ROUTE_INFO) == set(Route)
+    model_routes = {Route.REALTIME, Route.FUNDAMENTALS, Route.GENERAL_FINANCE}
+    answered = set(compose.CODE_PATHS) | model_routes | {Route.OUT_OF_SCOPE}
+    assert answered == set(Route)
+    assert {intent.route for intent in INTENTS} <= set(compose.CODE_PATHS)

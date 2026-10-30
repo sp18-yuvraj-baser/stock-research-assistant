@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from sra.agent.followup import Turn
 from sra.agent.loop import OllamaError
+from sra.agent.router import Route
 from sra.dashboard import app as dashboard_app
 
 
@@ -30,7 +31,8 @@ def test_chat_endpoint_returns_the_existing_agent_answer(
         return SimpleNamespace(
             standalone=message,
             text="ROE measures profitability relative to shareholder equity.",
-            route=SimpleNamespace(value="general_finance"),
+            route=Route("general_finance"),
+            path=None,
             paths=[],
         )
 
@@ -50,6 +52,7 @@ def test_chat_endpoint_returns_the_existing_agent_answer(
             "database_queries": 0,
             "live_quote_requests": 0,
         },
+        "chart": None,
     }
 
 
@@ -70,7 +73,8 @@ def test_chat_endpoint_passes_history_and_shows_the_rewrite(
         return SimpleNamespace(
             standalone="I have 100 HDFC Bank shares, should I keep or sell them?",
             text="HDFC BANK LTD (HDFCBANK): review",
-            route=SimpleNamespace(value="advice"),
+            route=Route("advice"),
+            path=None,
             paths=[],
         )
 
@@ -175,7 +179,8 @@ def test_same_origin_post_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
         return SimpleNamespace(
             standalone=message,
             text="ok",
-            route=SimpleNamespace(value="out_of_scope"),
+            route=Route("out_of_scope"),
+            path=None,
             paths=[],
         )
 
@@ -269,7 +274,8 @@ def _ok_ask(message: str, *, history: list[Turn]) -> SimpleNamespace:
     return SimpleNamespace(
         standalone=message,
         text="ok",
-        route=SimpleNamespace(value="out_of_scope"),
+        route=Route("out_of_scope"),
+        path=None,
         paths=[],
     )
 
@@ -349,3 +355,38 @@ def test_chat_rejects_overlong_message(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(dashboard_app.MAX_TURN_CHARS) in response.json()["detail"]
     at_limit = "x" * dashboard_app.MAX_TURN_CHARS
     assert client.post("/api/chat", json={"message": at_limit}).status_code == 200
+
+
+def test_routes_lists_a_label_for_every_route() -> None:
+    labels = (
+        TestClient(dashboard_app.app, base_url="http://127.0.0.1")
+        .get("/api/routes")
+        .json()
+    )
+    assert set(labels) == {route.value for route in Route}
+    assert labels["advice"] == "Holding review"
+
+
+def test_chart_is_passed_through_when_a_path_draws_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sra.agent.loop import Chart, PathResult
+
+    path = PathResult(text="x", chart=Chart("TCS, 1 year", [("2026-10-28", 2460.0)]))
+    monkeypatch.setattr(
+        dashboard_app,
+        "ask",
+        lambda message, *, history: SimpleNamespace(
+            standalone=message,
+            text="x",
+            route=Route("realtime"),
+            path=path,
+            paths=[path],
+        ),
+    )
+    body = (
+        TestClient(dashboard_app.app, base_url="http://127.0.0.1")
+        .post("/api/chat", json={"message": "chart of TCS"})
+        .json()
+    )
+    assert body["chart"] == {"title": "TCS, 1 year", "points": [["2026-10-28", 2460.0]]}

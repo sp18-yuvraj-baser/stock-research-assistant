@@ -2,9 +2,10 @@ from typing import Any
 
 import pytest
 
-from sra.agent import compose, followup, holding
+from sra.agent import compose, followup
 from sra.agent.followup import Turn, standalone_question
 from sra.agent.loop import ModelUnavailableError, PathResult
+from sra.agent.router import Route
 
 HISTORY = [
     Turn("user", "I have 100 hdfc bank stocks, should I keep or sell them?"),
@@ -85,7 +86,7 @@ def test_ask_routes_and_answers_the_rewritten_question(
         reviewed.append(question)
         return PathResult(text="review")
 
-    monkeypatch.setattr(holding, "review", fake_review)
+    monkeypatch.setitem(compose.CODE_PATHS, Route.ADVICE, fake_review)
     answer = compose.ask("reply to above question", history=HISTORY)
     assert reviewed == [rewrite]
     assert answer.question == "reply to above question"

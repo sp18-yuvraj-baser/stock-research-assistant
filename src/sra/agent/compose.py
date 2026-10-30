@@ -8,6 +8,7 @@ routes run a single tool-using model loop. Follow-ups are rewritten to stand
 alone first, so no path ever sees earlier turns.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sra.agent import holding, screen
@@ -82,19 +83,21 @@ def ask(
         answer.text = OUT_OF_SCOPE
         return answer
 
-    if routing.route is Route.ADVICE:
-        # Rendered in code, not by the model: it never gives a verdict, and
-        # every figure and comparison in it is computed.
-        answer.path = holding.review(question)
-    elif routing.route is Route.SCREEN:
-        # Also code-rendered: a list of stocks must come from stated tests on
-        # real data, never from a model's memory of "good stocks".
-        answer.path = screen.run(question)
+    code_path = CODE_PATHS.get(routing.route)
+    if code_path is not None:
+        answer.path = code_path(question)
     else:
         answer.path = _MODEL_PATHS[routing.route](question, **kwargs)
     answer.text = answer.path.text
     return answer
 
+
+# Rendered in code, not by the model: figures, comparisons and lists of
+# stocks must come from real data and stated rules, never from sampling.
+CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
+    Route.ADVICE: holding.review,
+    Route.SCREEN: screen.run,
+}
 
 _MODEL_PATHS = {
     Route.REALTIME: realtime_path,

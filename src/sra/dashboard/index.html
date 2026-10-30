@@ -90,6 +90,12 @@
     .disclaimer { margin:6px 0 0; padding-top:10px; border-top:1px dashed var(--line); font-size:12.5px; color:var(--muted) }
 
     details.trace { font-size:12.5px; color:var(--muted) }
+    .chart { margin:14px 0 0; padding:10px 12px 8px; border:1px solid var(--line); border-radius:10px }
+    .chart figcaption { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-bottom:6px }
+    .chart svg { width:100%; height:auto; display:block }
+    .chart .line { fill:none; stroke-width:2; vector-effect:non-scaling-stroke }
+    .chart .line.up { stroke:var(--good) } .chart .line.down { stroke:var(--bad) }
+    .chart .axis { display:flex; justify-content:space-between; gap:8px; font-size:11.5px; color:var(--muted); margin-top:4px }
     details.trace summary { cursor:pointer; width:max-content }
     details.trace p { margin:4px 0 0 }
 
@@ -176,10 +182,8 @@
     const STORE_KEY = 'sra.chat.v1';
     const HISTORY_SENT = 10;
     const ASSISTANT_CHARS_SENT = 1500;
-    const ROUTE_LABELS = {
-      advice: 'Holding review', screen: 'Stock screen', realtime: 'Live price', fundamentals: 'Fundamentals',
-      general_finance: 'Explainer', out_of_scope: 'Out of scope',
-    };
+    // Filled from /api/routes, so a new server-side route needs no UI change.
+    let ROUTE_LABELS = {};
     let conversation = [];
 
     const el = (tag, className, text) => {
@@ -283,6 +287,38 @@
       return root;
     }
 
+    // A price line drawn from the answer's own series; numbers come only from
+    // the server, and every label is text content, never HTML.
+    function renderChart(chart) {
+      const NS = 'http://www.w3.org/2000/svg';
+      const W = 640, H = 180, PAD = 8;
+      const closes = chart.points.map(p => p[1]);
+      const lo = Math.min(...closes), hi = Math.max(...closes);
+      const span = hi - lo || 1;
+      const x = i => PAD + (i * (W - 2 * PAD)) / (closes.length - 1);
+      const y = v => PAD + ((hi - v) * (H - 2 * PAD)) / span;
+      const up = closes[closes.length - 1] >= closes[0];
+      const figure = el('figure', 'chart');
+      figure.append(el('figcaption', '', chart.title));
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+      svg.setAttribute('role', 'img');
+      svg.setAttribute('aria-label', `${chart.title}: from ${closes[0]} to ${closes[closes.length - 1]}`);
+      const line = document.createElementNS(NS, 'polyline');
+      line.setAttribute('points', closes.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' '));
+      line.setAttribute('class', up ? 'line up' : 'line down');
+      svg.append(line);
+      figure.append(svg);
+      const axis = el('div', 'axis');
+      axis.append(
+        el('span', '', chart.points[0][0]),
+        el('span', '', `low ${lo.toLocaleString('en-IN')} · high ${hi.toLocaleString('en-IN')}`),
+        el('span', '', chart.points[chart.points.length - 1][0]),
+      );
+      figure.append(axis);
+      return figure;
+    }
+
     function traceText(trace) {
       const parts = [trace.source];
       if (trace.database_queries) parts.push(`${trace.database_queries} database ${trace.database_queries === 1 ? 'query' : 'queries'}`);
@@ -304,6 +340,7 @@
       if (turn.interpreted_as) label.append(el('span', 'interpreted', `Understood as: “${turn.interpreted_as}”`));
       const card = el('div', 'card');
       card.append(turn.error ? el('p', '', turn.content) : renderAnswer(turn.content));
+      if (turn.chart && turn.chart.points && turn.chart.points.length > 1) card.append(renderChart(turn.chart));
       wrap.append(label, card);
       if (turn.trace) {
         const details = el('details', 'trace');
@@ -373,6 +410,7 @@
         addTurn({
           role: 'assistant', content: payload.answer, route: payload.route,
           interpreted_as: payload.interpreted_as, trace: payload.research_summary,
+          chart: payload.chart,
         });
       } catch (error) {
         typing.remove();
@@ -409,10 +447,17 @@
       input.focus();
     });
 
-    conversation = load();
-    if (conversation.length) conversation.forEach(renderTurn); else showWelcome();
-    scroller.scrollTop = scroller.scrollHeight;
-    input.focus();
+    async function start() {
+      try {
+        const response = await fetch('/api/routes');
+        if (response.ok) ROUTE_LABELS = await response.json();
+      } catch (_) {}
+      conversation = load();
+      if (conversation.length) conversation.forEach(renderTurn); else showWelcome();
+      scroller.scrollTop = scroller.scrollHeight;
+      input.focus();
+    }
+    start();
   </script>
 </body>
 </html>

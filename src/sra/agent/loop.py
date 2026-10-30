@@ -38,6 +38,14 @@ ANSWER_TIMEOUT_SECONDS = 600.0
 MAX_REPEATED_CALLS = 2
 
 
+@dataclass(frozen=True)
+class Chart:
+    """A price series for the UI to draw under the answer: (ISO date, close)."""
+
+    title: str
+    points: list[tuple[str, float]]
+
+
 @dataclass
 class PathResult:
     """What one path produced: the answer and the tool calls behind it."""
@@ -47,6 +55,7 @@ class PathResult:
     quote_calls: list[LiveQuote] = field(default_factory=list)
     rounds: int = 0
     stopped_early: bool = False
+    chart: Chart | None = None
 
 
 class OllamaError(RuntimeError):

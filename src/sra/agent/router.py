@@ -8,6 +8,7 @@ the answer in as `names_company` rather than this module touching the DB.
 import re
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import NamedTuple
 
 
 class Route(StrEnum):
@@ -38,6 +39,48 @@ _SCREEN = (
 class Routing:
     route: Route
     reasons: tuple[str, ...]
+
+
+class RouteInfo(NamedTuple):
+    label: str  # the answer's badge in the chat UI
+    source: str  # "how this was researched", shown under the answer
+
+
+# The one place a route is described; the dashboard and its /api/routes read
+# this, so a new route cannot be missing from the UI or the research summary.
+ROUTE_INFO: dict[Route, RouteInfo] = {
+    Route.ADVICE: RouteInfo(
+        "Holding review", "Holding review from live quote and fundamentals; no verdict."
+    ),
+    Route.SCREEN: RouteInfo(
+        "Stock screen", "Fundamentals screen with stated tests; not a buy list."
+    ),
+    Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
+    Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
+    Route.GENERAL_FINANCE: RouteInfo(
+        "Explainer", "General finance explanation; no market data used."
+    ),
+    Route.OUT_OF_SCOPE: RouteInfo("Out of scope", "Scope check; no market data used."),
+}
+
+
+@dataclass(frozen=True)
+class Intent:
+    """A code-rendered feature's trigger: patterns that claim a question.
+
+    Checked in INTENTS order after the out-of-scope check and before the
+    screen/advice/model routes. Definitions ("what is a 52 week high?") stay
+    education unless the intent explicitly answers them.
+    """
+
+    route: Route
+    patterns: tuple[str, ...]
+    unless_education: bool = True
+    unless_holding: bool = False
+
+
+# Ordered: earlier intents win. Feature phases add to this.
+INTENTS: tuple[Intent, ...] = ()
 
 
 # Asking what to do about a stock is always answered with a holding review,
@@ -224,6 +267,19 @@ def route_question(
         return Routing(
             Route.OUT_OF_SCOPE, tuple(f"outside_india:{item}" for item in foreign)
         )
+
+    education_cue = bool(_matches(text, _EDUCATION))
+    holding_cue = bool(_matches(text, _HOLDING))
+    for intent in INTENTS:
+        if intent.unless_education and education_cue:
+            continue
+        if intent.unless_holding and holding_cue:
+            continue
+        found = _matches(text, intent.patterns)
+        if found:
+            return Routing(
+                intent.route, tuple(f"{intent.route.value}:{p}" for p in found)
+            )
 
     # Before advice: "which stock should I pick?" names no company to review.
     screen = [] if _matches(text, _HOLDING) else _matches(text, _SCREEN)

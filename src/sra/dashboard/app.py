@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from sra.agent.compose import Answer, ask
 from sra.agent.followup import Turn
 from sra.agent.loop import OllamaError
+from sra.agent.router import ROUTE_INFO
 from sra.config import configure_logging, settings
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,14 @@ def chat(payload: dict[str, Any]) -> dict[str, Any]:
             answer.standalone if answer.standalone not in ("", message) else None
         ),
         "research_summary": _research_summary(answer),
+        "chart": (
+            None
+            if answer.path is None or answer.path.chart is None
+            else {
+                "title": answer.path.chart.title,
+                "points": [list(point) for point in answer.path.chart.points],
+            }
+        ),
     }
 
 
@@ -154,21 +163,18 @@ def _research_summary(answer: Answer) -> dict[str, Any]:
     """Return an auditable activity summary without exposing private reasoning."""
     query_count = sum(len(path.sql_calls) for path in answer.paths)
     quote_count = sum(len(path.quote_calls) for path in answer.paths)
-    route = answer.route.value
-    source = {
-        "realtime": "Live last-traded quote from Upstox.",
-        "fundamentals": "NSE/BSE fundamentals database.",
-        "general_finance": "General finance explanation; no market data used.",
-        "advice": "Holding review from live quote and fundamentals; no verdict.",
-        "screen": "Fundamentals screen with stated tests; not a buy list.",
-        "out_of_scope": "Scope check; no market data used.",
-    }[route]
     return {
-        "route": route,
-        "source": source,
+        "route": answer.route.value,
+        "source": ROUTE_INFO[answer.route].source,
         "database_queries": query_count,
         "live_quote_requests": quote_count,
     }
+
+
+@app.get("/api/routes")
+def routes() -> dict[str, str]:
+    """Badge label per route, so the UI never hard-codes the route list."""
+    return {route.value: info.label for route, info in ROUTE_INFO.items()}
 
 
 @app.get("/api/health")
