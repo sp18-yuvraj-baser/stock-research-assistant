@@ -10,6 +10,7 @@ no model at all, the passages are the answer.
 
 import io
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -25,6 +26,11 @@ from sra.feeds import IST, USER_AGENT
 
 MAX_PDF_BYTES = 15 * 1024 * 1024
 MAX_PAGES = 120
+# A small PDF can expand into huge text (compressed streams); stop at this
+# much text and after this long, whichever comes first.
+MAX_TEXT_CHARS = 2_000_000
+DOWNLOAD_DEADLINE_SECONDS = 45.0
+EXTRACT_DEADLINE_SECONDS = 30.0
 PASSAGE_CHARS = 700
 PASSAGES_USED = 5
 FETCH_TIMEOUT_SECONDS = 30.0
@@ -146,6 +152,7 @@ def pdf_text(url: str) -> str:
     """The document's text; raises ValueError for anything unreadable."""
     if not url.startswith("https://"):
         raise ValueError("only https filings are fetched")
+    started = time.monotonic()
     try:
         with httpx.stream(
             "GET",
@@ -160,12 +167,24 @@ def pdf_text(url: str) -> str:
                 body += piece
                 if len(body) > MAX_PDF_BYTES:
                     raise ValueError("the filing is larger than 15 MB")
+                if time.monotonic() - started > DOWNLOAD_DEADLINE_SECONDS:
+                    raise ValueError("the filing took too long to download")
     except httpx.HTTPError as exc:
         raise ValueError(f"could not download the filing: {exc}") from exc
     try:
         reader = PdfReader(io.BytesIO(bytes(body)))
-        pages = reader.pages[:MAX_PAGES]
-        return "\n\n".join(page.extract_text() or "" for page in pages)
+        texts: list[str] = []
+        total = 0
+        started = time.monotonic()
+        for page in reader.pages[:MAX_PAGES]:
+            text = page.extract_text() or ""
+            texts.append(text[: MAX_TEXT_CHARS - total])
+            total += len(texts[-1])
+            if total >= MAX_TEXT_CHARS:
+                break
+            if time.monotonic() - started > EXTRACT_DEADLINE_SECONDS:
+                break
+        return "\n\n".join(texts)
     except (PdfReadError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"could not read the PDF: {exc}") from exc
 
