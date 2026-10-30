@@ -24,6 +24,7 @@ class Route(StrEnum):
     DISCOVER = "discover"
     NEWS = "news"
     ANNOUNCEMENTS = "announcements"
+    DOCUMENTS = "documents"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -105,6 +106,11 @@ ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.ANNOUNCEMENTS: RouteInfo(
         "BSE filings", "BSE announcements stored from its public feed.", titled=True
     ),
+    Route.DOCUMENTS: RouteInfo(
+        "From the filing",
+        "BSE filing PDF; answer limited to checked quotations.",
+        titled=True,
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -169,6 +175,22 @@ INTENTS: tuple[Intent, ...] = (
             r"\bis (the )?market (open|closed)\b",
             r"\b(stock |share )?market (holidays?|hours|timings)\b",
         ),
+    ),
+    # Before announcements: asking what a call said is about its content,
+    # not a list of filings.
+    Intent(
+        Route.DOCUMENTS,
+        (
+            r"\b(summari[sz]e|summary|what did|what does|say|said|says|highlights?"
+            r"|key points|commentary|guidance)\b.{0,60}\b(earnings call|concall"
+            r"|conference call|transcript|annual report|presentation)\b",
+            r"\b(earnings call|concall|conference call|transcript|annual report"
+            r"|presentation)\b.{0,60}\b(say|said|says|about|summary|highlights?"
+            r"|mention|on)\b",
+            r"\bmanagement (said|say|says|commentary|guidance)\b",
+        ),
+        # "what does the annual report say" is about a filing, not a definition.
+        unless_education=False,
     ),
     Intent(
         Route.ANNOUNCEMENTS,

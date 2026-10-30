@@ -282,3 +282,16 @@ def test_discovery_intents(question: str, route: Route) -> None:
 )
 def test_news_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("summarise TCS's latest earnings call", Route.DOCUMENTS),
+        ("what did infosys management say about attrition", Route.DOCUMENTS),
+        ("what does the reliance annual report say about debt", Route.DOCUMENTS),
+        ("TCS earnings call transcript", Route.ANNOUNCEMENTS),
+    ],
+)
+def test_document_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route
