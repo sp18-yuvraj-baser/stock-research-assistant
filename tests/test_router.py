@@ -21,9 +21,7 @@ def test_realtime_questions_cover_any_synced_indian_symbol(question: str) -> Non
     [
         "What is HDFC Bank's P/E ratio?",
         "Show Infosys revenue growth for 5 years.",
-        "What is the latest quarterly result of TCS?",
         "Which NSE stocks have ROE > 20%?",
-        "Compare TCS vs Infosys.",
         "Analyze ABCIND fundamentally.",
     ],
 )
@@ -219,4 +217,21 @@ def test_one_company_or_a_definition_is_not_a_screen(
     ],
 )
 def test_market_data_intents(question: str, route: Route) -> None:
+    assert route_question(question).route is route
+
+
+@pytest.mark.parametrize(
+    ("question", "route"),
+    [
+        ("Compare TCS vs Infosys.", Route.COMPARE),
+        ("hdfc bank versus icici bank", Route.COMPARE),
+        ("What is the latest quarterly result of TCS?", Route.RESULTS),
+        ("infosys q2 results", Route.RESULTS),
+        ("results of reliance", Route.RESULTS),
+        ("TCS dividend history", Route.DIVIDENDS),
+        ("does ITC pay dividends?", Route.DIVIDENDS),
+        ("What is a dividend?", Route.GENERAL_FINANCE),
+    ],
+)
+def test_fundamentals_depth_intents(question: str, route: Route) -> None:
     assert route_question(question).route is route

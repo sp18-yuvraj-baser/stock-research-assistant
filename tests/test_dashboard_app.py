@@ -364,7 +364,8 @@ def test_routes_lists_a_label_for_every_route() -> None:
         .json()
     )
     assert set(labels) == {route.value for route in Route}
-    assert labels["advice"] == "Holding review"
+    assert labels["advice"] == {"label": "Holding review", "titled": True}
+    assert labels["realtime"]["titled"] is False
 
 
 def test_chart_is_passed_through_when_a_path_draws_one(

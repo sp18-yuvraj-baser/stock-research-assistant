@@ -4,7 +4,8 @@ from decimal import Decimal
 import pytest
 
 from sra.agent import screen
-from sra.agent.screen import DISCLAIMER, Pick, Ratio, Series
+from sra.agent.screen import DISCLAIMER, Pick
+from sra.agent.universe import Ratio, Series
 
 TODAY = date(2026, 10, 29)
 

@@ -16,6 +16,9 @@ class Route(StrEnum):
     SCREEN = "screen"
     HISTORY = "history"
     MARKET = "market"
+    COMPARE = "compare"
+    RESULTS = "results"
+    DIVIDENDS = "dividends"
     REALTIME = "realtime"
     FUNDAMENTALS = "fundamentals"
     GENERAL_FINANCE = "general_finance"
@@ -46,21 +49,40 @@ class Routing:
 class RouteInfo(NamedTuple):
     label: str  # the answer's badge in the chat UI
     source: str  # "how this was researched", shown under the answer
+    # Code-rendered answers open with a title line the UI shows as a heading.
+    titled: bool = False
 
 
 # The one place a route is described; the dashboard and its /api/routes read
 # this, so a new route cannot be missing from the UI or the research summary.
 ROUTE_INFO: dict[Route, RouteInfo] = {
     Route.ADVICE: RouteInfo(
-        "Holding review", "Holding review from live quote and fundamentals; no verdict."
+        "Holding review",
+        "Holding review from live quote and fundamentals; no verdict.",
+        titled=True,
     ),
     Route.SCREEN: RouteInfo(
-        "Stock screen", "Fundamentals screen with stated tests; not a buy list."
+        "Stock screen",
+        "Fundamentals screen with stated tests; not a buy list.",
+        titled=True,
     ),
     Route.HISTORY: RouteInfo(
-        "Price history", "Upstox daily prices and live quote; returns computed."
+        "Price history",
+        "Upstox daily prices and live quote; returns computed.",
+        titled=True,
     ),
-    Route.MARKET: RouteInfo("Market", "Live index and stock quotes from Upstox."),
+    Route.MARKET: RouteInfo(
+        "Market", "Live index and stock quotes from Upstox.", titled=True
+    ),
+    Route.COMPARE: RouteInfo(
+        "Comparison", "Stored fundamentals and live quotes, side by side.", titled=True
+    ),
+    Route.RESULTS: RouteInfo(
+        "Quarterly results", "Upstox quarterly income statements.", titled=True
+    ),
+    Route.DIVIDENDS: RouteInfo(
+        "Dividends", "Upstox corporate actions and live price.", titled=True
+    ),
     Route.REALTIME: RouteInfo("Live price", "Live quote from Upstox."),
     Route.FUNDAMENTALS: RouteInfo("Fundamentals", "NSE/BSE fundamentals database."),
     Route.GENERAL_FINANCE: RouteInfo(
@@ -113,6 +135,16 @@ INTENTS: tuple[Intent, ...] = (
             r"\b(stock |share )?market (holidays?|hours|timings)\b",
         ),
     ),
+    Intent(Route.COMPARE, (r"\bcompare\b", r"\b(vs\.?|versus)\b")),
+    Intent(
+        Route.RESULTS,
+        (
+            r"\b(latest|last|recent|quarterly|q[1-4])\b.{0,25}\b(results?|earnings"
+            r"|numbers)\b",
+            r"\b(results?|earnings) (of|for)\b",
+        ),
+    ),
+    Intent(Route.DIVIDENDS, (r"\bdividends?\b",)),
 )
 
 

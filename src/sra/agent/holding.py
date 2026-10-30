@@ -399,11 +399,18 @@ def review(question: str) -> PathResult:
         "AND category IN ('revenue', 'net_profit')",
         params,
     )
-    result.sql_calls.extend([ratios_sql, financials_sql])
+    profile_sql = run_sql(
+        "SELECT sector FROM company_profiles WHERE instrument_key = %(key)s", params
+    )
+    result.sql_calls.extend([ratios_sql, financials_sql, profile_sql])
     ratios = _ratios(ratios_sql)
     series = _series(financials_sql)
 
     intro = "I can't tell you to buy, sell or hold, but here is what the data says."
+    # No sector until migration 009 and an ingest have run; the review stands
+    # without it.
+    if not profile_sql.error and profile_sql.rows and profile_sql.rows[0]["sector"]:
+        intro = f"Sector: {profile_sql.rows[0]['sector']}\n{intro}"
     if resolution.set_aside:
         others = ", ".join(f"{c.ticker} ({c.name})" for c in resolution.set_aside)
         intro += f"\nAlso matched {others}: ask separately if you meant it."

@@ -26,6 +26,22 @@ def period_start(label: str) -> date | None:
     return date(int(match.group(2)), _MONTHS.index(match.group(1)) + 1, 1)
 
 
+_DAY_LABEL = re.compile(r"^(\d{1,2}) ([A-Z][a-z]{2}) (\d{4})$")
+
+
+def parse_day(label: str) -> date | None:
+    """'14 Oct 2026' -> 2026-10-14; anything else -> None."""
+    match = _DAY_LABEL.match(label.strip())
+    if match is None or match.group(2) not in _MONTHS:
+        return None
+    try:
+        return date(
+            int(match.group(3)), _MONTHS.index(match.group(2)) + 1, int(match.group(1))
+        )
+    except ValueError:
+        return None
+
+
 def period_label(start: date) -> str:
     """2026-03-01 -> 'Mar 2026', the inverse of period_start."""
     return f"{_MONTHS[start.month - 1]} {start.year}"
@@ -53,3 +69,24 @@ def pct_change(prior: Decimal, current: Decimal) -> Decimal:
 def rupees(value: Decimal | float) -> str:
     """₹ with thousands separators and paise, e.g. '₹68,250.00'."""
     return f"₹{Decimal(str(value)):,.2f}"
+
+
+# A sector benchmark more than this many times off the company's own figure
+# is a data problem, not a comparison (HDFCBANK P/E 13.01 vs "sector" 0.32).
+IMPLAUSIBLE_GAP = Decimal(10)
+
+
+def usable_benchmark(own: Decimal, sector: Decimal | None) -> Decimal | None:
+    """The sector figure if it can be compared with `own`, else None."""
+    if sector is None or sector <= 0 or own <= 0:
+        return None
+    high, low = max(own, sector), min(own, sector)
+    return sector if high / low <= IMPLAUSIBLE_GAP else None
+
+
+def cagr(first: Decimal, last: Decimal, years: int) -> Decimal | None:
+    """Compound yearly growth in %, one decimal; None unless both are positive."""
+    if first <= 0 or last <= 0 or years <= 0:
+        return None
+    rate = (float(last) / float(first)) ** (1 / years) - 1
+    return Decimal(str(round(rate * 100, 1)))

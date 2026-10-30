@@ -66,6 +66,8 @@ class FakeData:
 
     def run_sql(self, sql: str, params: dict[str, Any] | None = None) -> SqlResult:
         assert params is not None
+        if "company_profiles" in sql:
+            return SqlResult(sql=sql, rows=[{"sector": "Banks"}])
         if "fundamental_ratios" in sql:
             if "ratios" in self.errors:
                 return SqlResult(sql=sql, error=self.errors["ratios"])
@@ -158,7 +160,7 @@ def test_review_renders_every_section_with_computed_figures(data: FakeData) -> N
         "I have 100 hdfc bank stocks bought at 600, should I keep or sell them?"
     ).text
 
-    assert text.startswith("HDFC BANK LTD (HDFCBANK): review")
+    assert text.startswith("HDFC BANK LTD (HDFCBANK): review\nSector: Banks\n")
     assert data.quotes == ["HDFCBANK:NSE_EQ"]
     assert "Live price: ₹682.50 (NSE, 29 Oct 2026, 12:32 IST)" in text
     assert "Your 100 shares: ₹68,250.00" in text

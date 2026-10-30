@@ -12,13 +12,18 @@ from decimal import Decimal
 from itertools import pairwise
 
 from sra.agent.loop import PathResult
-from sra.db import connect
+from sra.agent.universe import (
+    FINANCIALS_SQL,
+    PROFILES_SQL,
+    RATIOS_SQL,
+    load,
+)
 from sra.figures import (
+    cagr,
     months_between,
     pct_change,
     period_label,
-    period_start,
-    to_decimal,
+    usable_benchmark,
 )
 from sra.tools.get_live_quote import ist_time
 from sra.tools.run_sql import SqlResult
@@ -40,27 +45,9 @@ MAX_PE_TO_SECTOR = Decimal("1.5")
 MAX_PE_WITHOUT_SECTOR = Decimal(60)
 # Year-on-year jumps beyond this are mergers or one-offs, not steady growth.
 MAX_YEARLY_GROWTH_PCT = Decimal(50)
-# Same rule as the holding review: a benchmark >10x off is a data problem.
-_IMPLAUSIBLE_GAP = Decimal(10)
 # Figures older than this describe a different company.
 MAX_DATA_AGE_MONTHS = 24
 SHOWN = 10
-
-RATIOS_SQL = """
-SELECT i.instrument_key, i.ticker, i.name, fr.name AS metric,
-       fr.company_value, fr.sector_value, fr.fetched_at
-FROM fundamental_ratios fr
-JOIN instruments i ON i.instrument_key = fr.instrument_key
-WHERE i.exchange = 'NSE_EQ' AND fr.name IN ('ROE', 'P/E', 'NIM', 'Net NPA')
-"""
-
-FINANCIALS_SQL = """
-SELECT ff.instrument_key, ff.category, ff.period, ff.value
-FROM fundamental_financials ff
-JOIN instruments i ON i.instrument_key = ff.instrument_key
-WHERE i.exchange = 'NSE_EQ' AND ff.time_period = 'yearly'
-  AND ff.category IN ('revenue', 'net_profit', 'total_asset', 'total_liability')
-"""
 
 
 @dataclass(frozen=True)
@@ -80,18 +67,6 @@ class Pick:
         return self.pe / self.pe_sector if self.pe_sector else Decimal(1)
 
 
-def _usable_benchmark(own: Decimal, sector: Decimal | None) -> Decimal | None:
-    if sector is None or sector <= 0 or own <= 0:
-        return None
-    high, low = max(own, sector), min(own, sector)
-    return sector if high / low <= _IMPLAUSIBLE_GAP else None
-
-
-def _cagr(first: Decimal, last: Decimal, years: int) -> Decimal:
-    rate = (float(last) / float(first)) ** (1 / years) - 1
-    return Decimal(str(round(rate * 100, 1)))
-
-
 def _steady_growth(points: list[tuple[date, Decimal]]) -> Decimal | None:
     """Compound growth over the last GROWTH_YEARS years if the series is
     positive, a year apart, rising every year and free of step changes."""
@@ -103,7 +78,7 @@ def _steady_growth(points: list[tuple[date, Decimal]]) -> Decimal | None:
             return None
         if pct_change(prior, current) > MAX_YEARLY_GROWTH_PCT:
             return None
-    return _cagr(recent[0][1], recent[-1][1], GROWTH_YEARS)
+    return cagr(recent[0][1], recent[-1][1], GROWTH_YEARS)
 
 
 def _passes(
@@ -127,7 +102,7 @@ def _passes(
     is_bank = "NIM" in ratios
     if roe is None or roe < (MIN_BANK_ROE if is_bank else MIN_ROE):
         return None
-    sector_roe = _usable_benchmark(roe, roe_sector)
+    sector_roe = usable_benchmark(roe, roe_sector)
     if sector_roe is not None and roe < sector_roe:
         return None
 
@@ -146,7 +121,7 @@ def _passes(
     pe, pe_sector_raw = ratios.get("P/E", (None, None))
     if pe is None or pe <= 0:
         return None
-    pe_sector = _usable_benchmark(pe, pe_sector_raw)
+    pe_sector = usable_benchmark(pe, pe_sector_raw)
     limit = pe_sector * MAX_PE_TO_SECTOR if pe_sector else MAX_PE_WITHOUT_SECTOR
     if pe > limit:
         return None
@@ -168,52 +143,12 @@ def _rank(picks: list[Pick]) -> list[Pick]:
     return sorted(picks, key=lambda p: (score[p.ticker], p.ticker))
 
 
-Ratio = tuple[Decimal | None, Decimal | None]  # (company, sector)
-Series = list[tuple[date, Decimal]]  # oldest first
-
-
-@dataclass
-class _Company:
-    ticker: str
-    name: str
-    ratios: dict[str, Ratio]
-
-
-def _load() -> tuple[dict[str, _Company], dict[str, dict[str, Series]], object]:
-    """Every NSE listing's screening ratios and yearly series, plus the time
-    the newest ratio was fetched."""
-    companies: dict[str, _Company] = {}
-    series: dict[str, dict[str, Series]] = {}
-    fetched: list[object] = []
-    with connect(readonly=True) as conn:
-        for row in conn.execute(RATIOS_SQL).fetchall():
-            company = companies.setdefault(
-                str(row["instrument_key"]),
-                _Company(str(row["ticker"]), str(row["name"]), {}),
-            )
-            company.ratios[str(row["metric"])] = (
-                to_decimal(row["company_value"]),
-                to_decimal(row["sector_value"]),
-            )
-            fetched.append(row["fetched_at"])
-        for row in conn.execute(FINANCIALS_SQL).fetchall():
-            when, value = period_start(str(row["period"])), to_decimal(row["value"])
-            if when is not None and value is not None:
-                series.setdefault(str(row["instrument_key"]), {}).setdefault(
-                    str(row["category"]), []
-                ).append((when, value))
-    for by_category in series.values():
-        for points in by_category.values():
-            points.sort()
-    return companies, series, max(fetched, default=None)  # type: ignore[type-var]
-
-
 def screen_stocks(today: date) -> tuple[list[Pick], object]:
     """Every company passing the tests, best first, and the data's age."""
-    companies, series, fetched_at = _load()
+    universe = load()
     picks = []
-    for key, company in companies.items():
-        passed = _passes(company.ratios, series.get(key, {}), today)
+    for company in universe.companies.values():
+        passed = _passes(company.ratios, company.yearly, today)
         if passed is not None:
             roe, pe, pe_sector, revenue_growth, profit_growth, latest = passed
             picks.append(
@@ -228,7 +163,7 @@ def screen_stocks(today: date) -> tuple[list[Pick], object]:
                     period_label(latest),
                 )
             )
-    return _rank(picks), fetched_at
+    return _rank(picks), universe.fetched_at
 
 
 def _describe(position: int, pick: Pick) -> str:
@@ -274,7 +209,7 @@ def run(question: str) -> PathResult:
     shown = picks[:SHOWN]
     result.sql_calls.append(
         SqlResult(
-            sql=RATIOS_SQL + FINANCIALS_SQL,
+            sql=RATIOS_SQL + FINANCIALS_SQL + PROFILES_SQL,
             columns=["ticker", "roe", "profit_growth"],
             rows=[
                 {

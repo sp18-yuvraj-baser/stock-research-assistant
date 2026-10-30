@@ -10,9 +10,11 @@ from sra.figures import period_start
 from sra.ingest import fundamentals_run
 from sra.ingest.fundamentals_run import (
     _balance_sheet_rows,
-    _income_statement_rows,
+    _corporate_action_rows,
     _parse_ratio_value,
+    _profile_row,
     _ratio_rows,
+    _statement_rows,
     ingest_fundamentals,
 )
 from sra.upstox.client import UpstoxAuthError, UpstoxError
@@ -57,7 +59,7 @@ def test_income_statement_rows_flattens_category_history() -> None:
             ]
         }
     }
-    rows = _income_statement_rows(payload, time_period="yearly")
+    rows = _statement_rows(payload, statement="income_statement", time_period="yearly")
     assert rows == [
         {
             "statement": "income_statement",
@@ -132,7 +134,10 @@ def test_rows_carry_period_end_for_upstox_labels() -> None:
 @pytest.mark.parametrize("payload", [{"data": None}, {}, {"data": []}])
 def test_null_or_empty_data_yields_no_rows(payload: dict[str, Any]) -> None:
     assert _ratio_rows(payload) == []
-    assert _income_statement_rows(payload, time_period="yearly") == []
+    assert (
+        _statement_rows(payload, statement="income_statement", time_period="yearly")
+        == []
+    )
     assert _balance_sheet_rows(payload, time_period="yearly") == []
 
 
@@ -141,7 +146,7 @@ def test_wrong_shaped_payload_is_a_value_error(payload: Any) -> None:
     with pytest.raises(ValueError):
         _ratio_rows(payload)
     with pytest.raises(ValueError):
-        _income_statement_rows(payload, time_period="yearly")
+        _statement_rows(payload, statement="income_statement", time_period="yearly")
 
 
 def test_ratio_entries_without_a_name_are_skipped() -> None:
@@ -151,7 +156,10 @@ def test_ratio_entries_without_a_name_are_skipped() -> None:
 
 def test_income_statement_tolerates_null_history() -> None:
     payload = {"data": {"income_statement": [{"category": "revenue", "history": None}]}}
-    assert _income_statement_rows(payload, time_period="yearly") == []
+    assert (
+        _statement_rows(payload, statement="income_statement", time_period="yearly")
+        == []
+    )
 
 
 # --- ingest_fundamentals orchestration -------------------------------------
@@ -231,6 +239,10 @@ def _ok(path: str) -> dict[str, Any]:
         return {
             "data": {"income_statement": [{"category": "revenue", "history": history}]}
         }
+    if path.endswith("profile"):
+        return {"data": {"sector": "IT - Software"}}
+    if path.endswith("corporate-actions"):
+        return {"data": [{"name": "Dividend", "expiry_date": "14 Oct 2026"}]}
     return {"data": {"history": []}}
 
 
@@ -254,6 +266,12 @@ def test_all_run_aborts_on_expired_token(
     assert seen == ["AAA"]
     financial_writes = [p for q, p in writes if "fundamental_financials" in q]
     assert financial_writes[0]["period_end"] == date(2026, 3, 1)
+    assert [p["sector"] for q, p in writes if "company_profiles" in q] == [
+        "IT - Software"
+    ]
+    assert [p["ex_date"] for q, p in writes if "corporate_actions" in q] == [
+        date(2026, 10, 14)
+    ]
 
 
 def test_all_run_records_bad_payloads_and_continues(
@@ -327,3 +345,61 @@ def test_a_success_resets_the_failure_streak(
     }
     reports = ingest_fundamentals(all_equities=True)
     assert [r.error for r in reports] == ["down", None, "down"]
+
+
+def test_cash_flow_rows_share_the_statement_shape() -> None:
+    payload = {
+        "data": {
+            "cash_flow": [
+                {
+                    "category": "operating",
+                    "history": [{"period": "Mar 2026", "value": 52094.0}],
+                }
+            ]
+        }
+    }
+    rows = _statement_rows(payload, statement="cash_flow", time_period="yearly")
+    assert rows == [
+        {
+            "statement": "cash_flow",
+            "time_period": "yearly",
+            "category": "operating",
+            "period": "Mar 2026",
+            "period_end": date(2026, 3, 1),
+            "value": 52094.0,
+        }
+    ]
+
+
+def test_profile_keeps_sector_and_description() -> None:
+    payload = {"data": {"sector": "IT - Software", "company_profile": "TCS is..."}}
+    assert _profile_row(payload) == {
+        "sector": "IT - Software",
+        "description": "TCS is...",
+    }
+    assert _profile_row({"data": {}}) is None
+
+
+def test_corporate_actions_parse_dates_and_amounts() -> None:
+    payload = {
+        "data": [
+            {
+                "name": "Dividend",
+                "expiry_date": "14 Oct 2026",
+                "amount": 12.0,
+                "ratio": None,
+                "event_details": [
+                    {"name": "Ex dividend date", "value": "14 Oct 2026"},
+                    {"name": "Record date", "value": "15 Oct 2026"},
+                    {"name": "Dividend type", "value": "Interim"},
+                ],
+            },
+            {"name": "Dividend", "expiry_date": "someday"},  # no usable date
+        ]
+    }
+    (row,) = _corporate_action_rows(payload)
+    assert row["kind"] == "dividend"
+    assert row["ex_date"] == date(2026, 10, 14)
+    assert row["record_date"] == date(2026, 10, 15)
+    assert row["amount"] == 12.0
+    assert row["details"].obj["Dividend type"] == "Interim"

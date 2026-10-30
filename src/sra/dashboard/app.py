@@ -172,9 +172,12 @@ def _research_summary(answer: Answer) -> dict[str, Any]:
 
 
 @app.get("/api/routes")
-def routes() -> dict[str, str]:
-    """Badge label per route, so the UI never hard-codes the route list."""
-    return {route.value: info.label for route, info in ROUTE_INFO.items()}
+def routes() -> dict[str, dict[str, object]]:
+    """Badge label and title flag per route, so the UI never hard-codes them."""
+    return {
+        route.value: {"label": info.label, "titled": info.titled}
+        for route, info in ROUTE_INFO.items()
+    }
 
 
 @app.get("/api/health")

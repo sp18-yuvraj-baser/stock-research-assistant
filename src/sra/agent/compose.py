@@ -11,7 +11,7 @@ alone first, so no path ever sees earlier turns.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sra.agent import history, holding, market, screen
+from sra.agent import compare, dividends, history, holding, market, results, screen
 from sra.agent.companies import resolve_companies
 from sra.agent.followup import Turn, standalone_question
 from sra.agent.loop import (
@@ -100,6 +100,9 @@ CODE_PATHS: dict[Route, Callable[[str], PathResult]] = {
     Route.SCREEN: screen.run,
     Route.HISTORY: history.answer,
     Route.MARKET: market.answer,
+    Route.COMPARE: compare.answer,
+    Route.RESULTS: results.answer,
+    Route.DIVIDENDS: dividends.answer,
 }
 
 _MODEL_PATHS = {

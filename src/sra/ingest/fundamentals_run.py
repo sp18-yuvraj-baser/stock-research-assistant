@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from psycopg.types.json import Jsonb
+
 from sra.db import connect
-from sra.figures import period_start
+from sra.figures import parse_day, period_start
 from sra.upstox.client import UpstoxAuthError, UpstoxClient, UpstoxError
 from sra.upstox.instruments import UnknownInstrumentError
 
@@ -17,6 +19,29 @@ log = logging.getLogger(__name__)
 # network is down, not that these listings are bad: stop instead of spending
 # the next hour failing every remaining listing. Completed work is saved.
 MAX_CONSECUTIVE_FAILURES = 20
+
+UPSERT_PROFILE = """
+INSERT INTO company_profiles (instrument_key, sector, description, fetched_at)
+VALUES (%(instrument_key)s, %(sector)s, %(description)s, %(fetched_at)s)
+ON CONFLICT (instrument_key) DO UPDATE
+SET sector = EXCLUDED.sector,
+    description = EXCLUDED.description,
+    fetched_at = EXCLUDED.fetched_at
+"""
+
+UPSERT_ACTION = """
+INSERT INTO corporate_actions
+  (instrument_key, kind, ex_date, record_date, amount, ratio, details, fetched_at)
+VALUES
+  (%(instrument_key)s, %(kind)s, %(ex_date)s, %(record_date)s, %(amount)s,
+   %(ratio)s, %(details)s, %(fetched_at)s)
+ON CONFLICT (instrument_key, kind, ex_date) DO UPDATE
+SET record_date = EXCLUDED.record_date,
+    amount = EXCLUDED.amount,
+    ratio = EXCLUDED.ratio,
+    details = EXCLUDED.details,
+    fetched_at = EXCLUDED.fetched_at
+"""
 
 UPSERT_RATIO = """
 INSERT INTO fundamental_ratios
@@ -117,9 +142,13 @@ def _financial_row(
     }
 
 
-def _income_statement_rows(payload: Any, *, time_period: str) -> list[dict[str, Any]]:
+def _statement_rows(
+    payload: Any, *, statement: str, time_period: str
+) -> list[dict[str, Any]]:
+    """Income-statement and cash-flow history: a list of categories, each
+    with per-period values, under data[statement]."""
     rows = []
-    for entry in _data(payload, dict).get("income_statement") or []:
+    for entry in _data(payload, dict).get(statement) or []:
         if not isinstance(entry, dict) or not entry.get("category"):
             continue
         category = str(entry["category"])
@@ -127,13 +156,61 @@ def _income_statement_rows(payload: Any, *, time_period: str) -> list[dict[str, 
             if isinstance(point, dict) and point.get("period"):
                 rows.append(
                     _financial_row(
-                        "income_statement",
+                        statement,
                         time_period,
                         category,
                         str(point["period"]),
                         point.get("value"),
                     )
                 )
+    return rows
+
+
+def _profile_row(payload: Any) -> dict[str, Any] | None:
+    data = _data(payload, dict)
+    sector, description = data.get("sector"), data.get("company_profile")
+    if not sector and not description:
+        return None
+    return {
+        "sector": str(sector) if sector else None,
+        "description": str(description) if description else None,
+    }
+
+
+def _corporate_action_rows(payload: Any) -> list[dict[str, Any]]:
+    """Events with a usable ex-date; Upstox gives about the last year."""
+    rows = []
+    for event in _data(payload, list):
+        if not isinstance(event, dict) or not event.get("name"):
+            continue
+        details = {
+            str(d.get("name")): d.get("value")
+            for d in event.get("event_details") or []
+            if isinstance(d, dict) and d.get("name")
+        }
+        ex_date = parse_day(
+            str(
+                details.get("Ex dividend date")
+                or details.get("Ex date")
+                or event.get("expiry_date")
+                or ""
+            )
+        )
+        if ex_date is None:
+            continue
+        record = parse_day(str(details.get("Record date") or ""))
+        rows.append(
+            {
+                "kind": str(event["name"]).lower(),
+                "ex_date": ex_date,
+                "record_date": record,
+                "amount": _parse_ratio_value(
+                    None if event.get("amount") is None else str(event.get("amount"))
+                ),
+                "ratio": str(event["ratio"]) if event.get("ratio") else None,
+                "details": Jsonb(details),
+            }
+        )
     return rows
 
 
@@ -260,18 +337,20 @@ def ingest_fundamentals(
                 ratio_rows = _ratio_rows(
                     client.get_json(f"/v2/fundamentals/{isin}/key-ratios", params={})
                 )
-                financial_rows = _income_statement_rows(
+                financial_rows = _statement_rows(
                     client.get_json(
                         f"/v2/fundamentals/{isin}/income-statement",
                         params={"type": "consolidated", "time_period": "yearly"},
                     ),
+                    statement="income_statement",
                     time_period="yearly",
                 )
-                financial_rows += _income_statement_rows(
+                financial_rows += _statement_rows(
                     client.get_json(
                         f"/v2/fundamentals/{isin}/income-statement",
                         params={"type": "consolidated", "time_period": "quarterly"},
                     ),
+                    statement="income_statement",
                     time_period="quarterly",
                 )
                 financial_rows += _balance_sheet_rows(
@@ -280,6 +359,22 @@ def ingest_fundamentals(
                         params={"type": "consolidated"},
                     ),
                     time_period="yearly",
+                )
+                financial_rows += _statement_rows(
+                    client.get_json(
+                        f"/v2/fundamentals/{isin}/cash-flow",
+                        params={"type": "consolidated"},
+                    ),
+                    statement="cash_flow",
+                    time_period="yearly",
+                )
+                profile = _profile_row(
+                    client.get_json(f"/v2/fundamentals/{isin}/profile", params={})
+                )
+                actions = _corporate_action_rows(
+                    client.get_json(
+                        f"/v2/fundamentals/{isin}/corporate-actions", params={}
+                    )
                 )
             except UpstoxAuthError:
                 raise
@@ -312,6 +407,24 @@ def ingest_fundamentals(
                 for row in financial_rows:
                     conn.execute(
                         UPSERT_FINANCIAL,
+                        {
+                            "instrument_key": instrument_key,
+                            "fetched_at": fetched_at,
+                            **row,
+                        },
+                    )
+                if profile is not None:
+                    conn.execute(
+                        UPSERT_PROFILE,
+                        {
+                            "instrument_key": instrument_key,
+                            "fetched_at": fetched_at,
+                            **profile,
+                        },
+                    )
+                for row in actions:
+                    conn.execute(
+                        UPSERT_ACTION,
                         {
                             "instrument_key": instrument_key,
                             "fetched_at": fetched_at,
